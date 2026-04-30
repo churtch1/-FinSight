@@ -1,0 +1,7 @@
+account_name,provider,date,type,instrument_code,instrument_name,isin,asset_type,quantity,price,amount,currency,fee,tax,description
+IBKR Demo,IBKR,2026-04-30,position_snapshot,NVDA,NVIDIA CORP,US67066G1040,stock,10,900,9000,USD,0,0,Demo US stock position
+IBKR Demo,IBKR,2026-04-30,position_snapshot,VOO,Vanguard S&P 500 ETF,,fund,5,500,2500,USD,0,0,Demo ETF position
+HSBC China,HSBC China,2026-04-30,cash_balance,CNY CASH,CNY Cash,,cash,50000,1,50000,CNY,0,0,Demo cash balance
+HSBC China,HSBC China,2026-04-30,position_snapshot,HSBC-WM-001,HSBC Wealth Product,,wealth_product,1,100000,100000,CNY,0,0,Demo wealth product
+HSBC China,HSBC China,2026-04-30,position_snapshot,AU9999,Gold Holding,,gold,100,500,50000,CNY,0,0,Demo gold holding
+

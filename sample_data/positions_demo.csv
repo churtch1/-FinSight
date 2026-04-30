@@ -1,0 +1,7 @@
+provider,account_name,symbol,instrument_name,asset_type,quantity,price_original,market_value_original,currency,market_value_usd,valuation_date
+IBKR,IBKR Demo,NVDA,NVIDIA CORP,stock,10,900,9000,USD,9000,2026-04-30
+IBKR,IBKR Demo,VOO,Vanguard S&P 500 ETF,fund,5,500,2500,USD,2500,2026-04-30
+HSBC China,HSBC China,CNY CASH,CNY Cash,cash,50000,1,50000,CNY,6900,2026-04-30
+HSBC China,HSBC China,HSBC-WM-001,HSBC Wealth Product,wealth_product,1,100000,100000,CNY,13800,2026-04-30
+HSBC China,HSBC China,AU9999,Gold Holding,gold,100,500,50000,CNY,6900,2026-04-30
+

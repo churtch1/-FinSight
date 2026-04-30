@@ -1,0 +1,5 @@
+base_currency,quote_currency,rate,rate_date,source
+USD,USD,1,2026-04-30,manual
+CNY,USD,0.138,2026-04-30,manual
+HKD,USD,0.128,2026-04-30,manual
+
