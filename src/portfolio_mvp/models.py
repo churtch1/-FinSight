@@ -31,14 +31,18 @@ ASSET_TYPES: tuple[str, ...] = (
 TRANSACTION_TYPES: tuple[str, ...] = (
     "buy",
     "sell",
+    "subscribe",
+    "redeem",
     "deposit",
     "withdrawal",
     "dividend",
     "interest",
+    "coupon",
     "fee",
     "tax",
     "cash_balance",
     "position_snapshot",
+    "other",
 )
 
 
@@ -84,4 +88,3 @@ def normalize_asset_type(value: str | None) -> str:
         "债券": "bond",
     }
     return aliases.get(normalized, "other")
-
