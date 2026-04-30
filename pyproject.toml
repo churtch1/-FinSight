@@ -27,3 +27,10 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+norecursedirs = [
+  ".git",
+  ".pytest_cache",
+  "pytest-cache-files-*",
+]
+

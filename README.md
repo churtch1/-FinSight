@@ -132,13 +132,15 @@ python scripts/sync_ibkr.py --account all
 第一版同步：
 
 - 当前持仓。
-- USD 现金余额。
+- 多币种现金余额。
+- 账户摘要中的基础币种等关键字段。
 - TWS/Gateway 当前可返回的成交流水。
+- 同步失败时写入 `statement_imports` 和 `import_errors`，方便复核。
 
 测试方式：
 
 - 未启动 Gateway/TWS 时，脚本应清楚提示无法连接。
-- 启动 Gateway/TWS 后，`positions_current` 应出现 IBKR 持仓和 USD Cash。
+- 启动 Gateway/TWS 后，`positions_current` 应出现 IBKR 持仓和各币种 Cash。
 
 ## 7. 运行 Streamlit Dashboard
 
