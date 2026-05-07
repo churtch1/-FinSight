@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,7 @@ class FakeIB:
 
     def portfolio(self) -> list[SimpleNamespace]:
         contract = SimpleNamespace(symbol="AAPL", localSymbol="AAPL", conId=265598, secType="STK", currency="USD")
+        treasury = SimpleNamespace(symbol="US-T", localSymbol="IBCID888001", conId=888001, secType="BOND", currency="USD")
         return [
             SimpleNamespace(
                 account="DU123",
@@ -36,7 +38,18 @@ class FakeIB:
                 position=10,
                 marketPrice=190.25,
                 marketValue=1902.50,
-            )
+                averageCost=150.00,
+                unrealizedPNL=402.50,
+            ),
+            SimpleNamespace(
+                account="DU123",
+                contract=treasury,
+                position=100,
+                marketPrice=99.10,
+                marketValue=9910.00,
+                averageCost=98.40,
+                unrealizedPNL=70.00,
+            ),
         ]
 
     def accountValues(self) -> list[SimpleNamespace]:
@@ -45,6 +58,7 @@ class FakeIB:
             SimpleNamespace(account="DU123", tag="TotalCashBalance", value="1000.25", currency="USD"),
             SimpleNamespace(account="DU123", tag="CashBalance", value="8000", currency="HKD"),
             SimpleNamespace(account="DU123", tag="CashBalance", value="0", currency="CNY"),
+            SimpleNamespace(account="DU123", tag="CashBalance", value="200", currency="BASE"),
         ]
 
     def reqExecutions(self) -> list[SimpleNamespace]:
@@ -78,9 +92,14 @@ def test_sync_ibkr_data_normalizes_positions_cash_and_executions() -> None:
     cash_rows = [row for row in data.rows if row.type == "cash_balance"]
     execution_rows = [row for row in data.rows if row.type == "buy"]
 
-    assert len(position_rows) == 1
+    assert len(position_rows) == 2
     assert position_rows[0].instrument_code == "AAPL"
     assert position_rows[0].asset_type == "stock"
+    assert position_rows[0].cost == Decimal("1500.00")
+    assert position_rows[0].unrealized_pnl == Decimal("402.5")
+    assert position_rows[1].instrument_code == "IBCID888001"
+    assert position_rows[1].asset_type == "bond"
+    assert position_rows[1].instrument_name == "US-T (IBCID888001)"
 
     assert sorted(row.currency for row in cash_rows) == ["HKD", "USD"]
     assert {row.instrument_code for row in cash_rows} == {"HKD CASH", "USD CASH"}

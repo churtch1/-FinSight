@@ -102,6 +102,12 @@ create table if not exists positions_current (
   unique(account_id, instrument_id, valuation_date)
 );
 
+alter table positions_current add column if not exists cost_original numeric(24, 2);
+alter table positions_current add column if not exists unrealized_pnl_original numeric(24, 2);
+alter table positions_current add column if not exists income_original numeric(24, 2);
+alter table positions_current add column if not exists total_pnl_original numeric(24, 2);
+alter table positions_current add column if not exists pnl_pct numeric(12, 6);
+
 create table if not exists transactions (
   id uuid primary key default gen_random_uuid(),
   statement_import_id uuid references statement_imports(id),

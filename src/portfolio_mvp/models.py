@@ -59,6 +59,10 @@ class NormalizedRow:
     fee: Decimal
     tax: Decimal
     description: str
+    cost: Decimal | None = None
+    unrealized_pnl: Decimal | None = None
+    income: Decimal | None = None
+    total_pnl: Decimal | None = None
 
 
 def normalize_asset_type(value: str | None) -> str:

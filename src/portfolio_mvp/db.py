@@ -16,7 +16,10 @@ def get_supabase(use_service_role: bool = False, settings: Settings | None = Non
     key = settings.supabase_service_role_key if use_service_role else settings.supabase_anon_key
     if not settings.supabase_url or not key:
         key_name = "SUPABASE_SERVICE_ROLE_KEY" if use_service_role else "SUPABASE_ANON_KEY"
-        raise MissingSupabaseConfig(f"Missing SUPABASE_URL or {key_name}. Copy .env.example to .env and fill it in.")
+        raise MissingSupabaseConfig(
+            f"Missing SUPABASE_URL or {key_name}. "
+            "Set them in .env for local use, or in Streamlit Secrets for cloud deployment."
+        )
     return create_client(settings.supabase_url, key)
 
 
@@ -42,4 +45,3 @@ def fetch_dashboard_data(client: Client) -> dict[str, list[dict[str, Any]]]:
         "fx_rates": client.table("fx_rates").select("*").order("rate_date", desc=True).limit(50).execute().data
         or [],
     }
-

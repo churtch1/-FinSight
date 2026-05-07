@@ -25,6 +25,8 @@ CASH_TAG_PRIORITY = {
     "SettledCash": 3,
 }
 
+IGNORED_CASH_CURRENCIES = {"", "BASE"}
+
 
 @dataclass(frozen=True)
 class IbkrSyncData:
@@ -125,6 +127,9 @@ def _position_rows(ib: Any, selected_accounts: list[str], today: date) -> list[N
                 quantity=_decimal(getattr(item, "position", 0)),
                 price=_decimal(getattr(item, "marketPrice", 0)),
                 amount=_decimal(getattr(item, "marketValue", 0)),
+                cost=_position_cost(item),
+                unrealized_pnl=_optional_decimal(getattr(item, "unrealizedPNL", None)),
+                total_pnl=_optional_decimal(getattr(item, "unrealizedPNL", None)),
                 today=today,
                 description="IBKR portfolio snapshot",
             )
@@ -146,6 +151,9 @@ def _position_rows(ib: Any, selected_accounts: list[str], today: date) -> list[N
                 quantity=quantity,
                 price=price,
                 amount=(quantity * price).quantize(Decimal("0.01")),
+                cost=(quantity * price).quantize(Decimal("0.01")),
+                unrealized_pnl=None,
+                total_pnl=None,
                 today=today,
                 description="IBKR position snapshot using average cost",
             )
@@ -159,6 +167,9 @@ def _position_row(
     quantity: Decimal,
     price: Decimal,
     amount: Decimal,
+    cost: Decimal | None,
+    unrealized_pnl: Decimal | None,
+    total_pnl: Decimal | None,
     today: date,
     description: str,
 ) -> NormalizedRow:
@@ -178,6 +189,9 @@ def _position_row(
         fee=Decimal("0"),
         tax=Decimal("0"),
         description=description,
+        cost=cost,
+        unrealized_pnl=unrealized_pnl,
+        total_pnl=total_pnl,
     )
 
 
@@ -188,7 +202,7 @@ def _cash_rows(ib: Any, selected_accounts: list[str], today: date) -> list[Norma
         account = _text(getattr(value, "account", ""))
         currency = _text(getattr(value, "currency", "")).upper()
         tag = _text(getattr(value, "tag", ""))
-        if not account or not currency or tag not in CASH_TAG_PRIORITY:
+        if not account or currency in IGNORED_CASH_CURRENCIES or tag not in CASH_TAG_PRIORITY:
             continue
         if selected and account not in selected:
             continue
@@ -262,7 +276,7 @@ def _execution_rows(ib: Any, selected_accounts: list[str], today: date) -> list[
 
 
 def _asset_type_for_contract(contract: Any) -> str:
-    security_type = _text(getattr(contract, "secType", "")).upper()
+    security_type = _security_type(contract)
     if security_type == "STK":
         return "stock"
     if security_type in {"ETF", "FUND", "MUTF"}:
@@ -271,21 +285,74 @@ def _asset_type_for_contract(contract: Any) -> str:
         return "bond"
     if security_type in {"CASH", "FX"}:
         return "cash"
+    code = f"{_contract_code(contract)} {_contract_name(contract)}".upper()
+    if any(token in code for token in ("US-T", "UST", "TREASURY", "T-BILL", "T BILL", "BOND")):
+        return "bond"
     return "other"
 
 
 def _contract_code(contract: Any) -> str:
-    return _text(getattr(contract, "symbol", "")) or _text(getattr(contract, "localSymbol", "")) or str(getattr(contract, "conId", ""))
+    symbol = _text(getattr(contract, "symbol", ""))
+    local_symbol = _text(getattr(contract, "localSymbol", ""))
+    if _is_bond_like_contract(contract):
+        return local_symbol or str(getattr(contract, "conId", "")) or symbol
+    return symbol or local_symbol or str(getattr(contract, "conId", ""))
 
 
 def _contract_name(contract: Any) -> str:
-    return _text(getattr(contract, "localSymbol", "")) or _text(getattr(contract, "symbol", "")) or str(getattr(contract, "conId", ""))
+    local_symbol = _text(getattr(contract, "localSymbol", ""))
+    symbol = _text(getattr(contract, "symbol", ""))
+    long_name = _text(getattr(contract, "description", "")) or _text(getattr(contract, "longName", ""))
+    if long_name:
+        return long_name
+    if _is_bond_like_contract(contract) and symbol and local_symbol:
+        return f"{symbol} ({local_symbol})"
+    if local_symbol and not local_symbol.startswith("IBCID"):
+        return local_symbol
+    if symbol:
+        return symbol
+    return str(getattr(contract, "conId", ""))
+
+
+def _security_type(contract: Any) -> str:
+    return _text(getattr(contract, "secType", "")).upper()
+
+
+def _is_bond_like_contract(contract: Any) -> bool:
+    security_type = _security_type(contract)
+    if security_type in {"BOND", "BILL", "NOTE"}:
+        return True
+    code = " ".join(
+        [
+            _text(getattr(contract, "symbol", "")),
+            _text(getattr(contract, "localSymbol", "")),
+            _text(getattr(contract, "description", "")),
+            _text(getattr(contract, "longName", "")),
+        ]
+    ).upper()
+    return any(token in code for token in ("US-T", "UST", "TREASURY", "T-BILL", "T BILL", "BOND"))
 
 
 def _decimal(value: Any) -> Decimal:
     if value is None or value == "":
         return Decimal("0")
     return Decimal(str(value))
+
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    return Decimal(str(value))
+
+
+def _position_cost(item: Any) -> Decimal | None:
+    quantity = _decimal(getattr(item, "position", 0))
+    average_cost = _optional_decimal(getattr(item, "averageCost", None))
+    if average_cost is None:
+        average_cost = _optional_decimal(getattr(item, "avgCost", None))
+    if average_cost is None:
+        return None
+    return (quantity * average_cost).quantize(Decimal("0.01"))
 
 
 def _text(value: Any) -> str:

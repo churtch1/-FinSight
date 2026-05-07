@@ -10,6 +10,11 @@ env/
 
 # Local environment files
 .env
+.streamlit/secrets.toml
+
+# Private source documents and local scratch files
+HSBC/
+py
 
 # Tool caches
 .pytest_cache/
