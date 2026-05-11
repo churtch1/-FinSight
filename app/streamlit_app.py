@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import pandas as pd
 import plotly.express as px
@@ -77,6 +78,15 @@ FLASH_KEY = "dashboard_flash"
 HSBC_PREVIEW_KEY = "hsbc_preview_rows"
 HSBC_PREVIEW_NAME_KEY = "hsbc_preview_name"
 
+NAV_ICON_SVGS = {
+    "总览": '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect></svg>',
+    "结构": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9v9z"></path><path d="M12 3c4.97 0 9 4.03 9 9h-9z"></path></svg>',
+    "持仓": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6V5a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v1"></path><rect x="3" y="6" width="18" height="14" rx="2"></rect><path d="M3 12h18"></path></svg>',
+    "操作": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path><circle cx="12" cy="12" r="3"></circle></svg>',
+    "USD": '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" x2="12" y1="2" y2="22"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path></svg>',
+    "CNY": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 3 6 8 6-8"></path><path d="M12 11v10"></path><path d="M8 13h8"></path><path d="M8 17h8"></path></svg>',
+}
+
 PANEL_SPECS = [
     {
         "asset_type": "stock",
@@ -109,7 +119,7 @@ PANEL_SPECS = [
 ]
 
 
-st.set_page_config(page_title="LXY的Finsight", layout="wide")
+st.set_page_config(page_title="LXY的Finsight", layout="wide", initial_sidebar_state="collapsed")
 
 
 def inject_styles() -> None:
@@ -125,9 +135,185 @@ def inject_styles() -> None:
             background: transparent;
         }
         [data-testid="stMainBlockContainer"] {
-            padding-top: 2rem;
+            padding-top: 1.1rem;
             padding-bottom: 3rem;
             max-width: 1140px;
+        }
+        [data-testid="stSidebar"] {
+            border-right: 1px solid color-mix(in srgb, var(--st-text-color) 10%, transparent 90%);
+        }
+        [data-testid="stSidebar"] > div:first-child {
+            background:
+                linear-gradient(
+                    180deg,
+                    color-mix(in srgb, var(--st-secondary-background-color) 94%, var(--st-background-color) 6%) 0%,
+                    color-mix(in srgb, var(--st-secondary-background-color) 86%, var(--st-background-color) 14%) 100%
+                );
+            padding-top: 1.25rem;
+            box-shadow: 18px 0 42px rgba(15, 23, 42, 0.08);
+        }
+        [data-testid="stSidebar"] .sidebar-brand {
+            font-size: 1.28rem;
+            font-weight: 950;
+            line-height: 1.08;
+            margin-bottom: 0.2rem;
+        }
+        [data-testid="stSidebar"] .sidebar-subtitle {
+            color: color-mix(in srgb, var(--st-text-color) 62%, transparent 38%);
+            font-size: 0.88rem;
+            line-height: 1.35;
+        }
+        [data-testid="stSidebar"] .sidebar-block {
+            margin-bottom: 1rem;
+        }
+        [data-testid="stSidebar"] .sidebar-kicker {
+            font-size: 0.82rem;
+            font-weight: 800;
+            color: var(--st-link-color);
+            margin-bottom: 0.2rem;
+        }
+        [data-testid="stSidebar"] .sidebar-fx {
+            border-radius: 18px;
+            padding: 0.9rem 0.95rem;
+            background: linear-gradient(180deg, rgba(37,99,235,0.12), rgba(37,99,235,0.05));
+            border: 1px solid rgba(37,99,235,0.18);
+            margin-bottom: 0.9rem;
+        }
+        [data-testid="stSidebar"] .sidebar-fx-label {
+            font-size: 0.82rem;
+            font-weight: 800;
+            opacity: 0.82;
+            margin-bottom: 0.18rem;
+        }
+        [data-testid="stSidebar"] .sidebar-fx-value {
+            font-size: 1.16rem;
+            font-weight: 900;
+            line-height: 1.15;
+        }
+        [data-testid="stSidebar"] .sidebar-fx-meta {
+            font-size: 0.8rem;
+            opacity: 0.7;
+            margin-top: 0.2rem;
+        }
+        [data-testid="stSidebar"] label[data-testid="stWidgetLabel"] p {
+            font-size: 1rem !important;
+            font-weight: 800 !important;
+        }
+        .sidebar-nav {
+            margin: 1rem 0 1.1rem 0;
+        }
+        .sidebar-nav-title {
+            color: color-mix(in srgb, var(--st-text-color) 60%, transparent 40%);
+            font-size: 0.95rem;
+            font-weight: 900;
+            letter-spacing: 0;
+            margin: 0 0 0.52rem 0.1rem;
+        }
+        .sidebar-nav-list {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 0.16rem;
+            width: 100%;
+        }
+        .sidebar-nav-item {
+            position: relative;
+            display: grid;
+            grid-template-columns: 1.35rem 1fr;
+            align-items: center;
+            gap: 0.64rem;
+            min-height: 2.85rem;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 0 0.78rem 0 0.95rem;
+            border-radius: 10px;
+            color: #6B7280;
+            text-decoration: none !important;
+            font-size: 1rem;
+            font-weight: 760;
+            line-height: 1;
+            background: transparent;
+            transition: background 120ms ease, color 120ms ease;
+        }
+        .sidebar-nav-item:hover {
+            background: rgba(17, 24, 39, 0.035);
+            color: color-mix(in srgb, var(--st-text-color) 78%, #6B7280 22%);
+            text-decoration: none !important;
+        }
+        .sidebar-nav-item svg {
+            width: 1.08rem;
+            height: 1.08rem;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            fill: none;
+        }
+        .sidebar-nav-item.active {
+            background: #EBF5FF;
+            color: #1A73E8;
+            font-weight: 860;
+        }
+        .sidebar-nav-item.active::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0.55rem;
+            bottom: 0.55rem;
+            width: 4px;
+            border-radius: 0 999px 999px 0;
+            background: #1A73E8;
+        }
+        .sidebar-nav-label {
+            display: block;
+        }
+        .filter-nav {
+            margin: 0.72rem 0 0.95rem 0;
+        }
+        .filter-nav-title {
+            color: var(--st-text-color);
+            font-size: 1rem;
+            font-weight: 900;
+            letter-spacing: 0;
+            margin-bottom: 0.46rem;
+        }
+        .filter-nav-list {
+            display: grid;
+            grid-template-columns: repeat(var(--filter-count, 4), minmax(0, 1fr));
+            width: 100%;
+            border: 1px solid color-mix(in srgb, var(--st-text-color) 12%, transparent 88%);
+            border-radius: 10px;
+            overflow: hidden;
+            background: color-mix(in srgb, var(--st-background-color) 84%, var(--st-secondary-background-color) 16%);
+        }
+        .filter-nav-item {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 2.58rem;
+            padding: 0 0.62rem;
+            border-right: 1px solid color-mix(in srgb, var(--st-text-color) 10%, transparent 90%);
+            color: #6B7280;
+            text-decoration: none !important;
+            font-size: 0.96rem;
+            font-weight: 720;
+            line-height: 1;
+            background: transparent;
+            transition: background 120ms ease, color 120ms ease;
+        }
+        .filter-nav-item:last-child {
+            border-right: 0;
+        }
+        .filter-nav-item:hover {
+            background: rgba(17, 24, 39, 0.035);
+            color: color-mix(in srgb, var(--st-text-color) 78%, #6B7280 22%);
+            text-decoration: none !important;
+        }
+        .filter-nav-item.active {
+            background: #EBF5FF;
+            color: #1A73E8;
+            font-weight: 860;
+            box-shadow: inset 4px 0 0 #1A73E8;
         }
         div[data-testid="stMetric"] {
             background: linear-gradient(
@@ -155,119 +341,162 @@ def inject_styles() -> None:
             box-shadow: 0 12px 32px rgba(15, 23, 42, 0.06);
         }
         .hero-card {
-            padding: 1.15rem 1.15rem 1rem 1.15rem;
-            margin-bottom: 0.35rem;
+            padding: 0.9rem 0.95rem 0.85rem 0.95rem;
+            margin-bottom: 0.2rem;
+        }
+        .hero-fx-card {
+            margin-top: 0.68rem;
+            border-radius: 14px;
+            padding: 0.62rem 0.72rem;
+            border: 1px solid color-mix(in srgb, var(--st-link-color) 20%, transparent 80%);
+            background: linear-gradient(
+                180deg,
+                color-mix(in srgb, var(--st-link-color) 10%, var(--st-secondary-background-color) 90%) 0%,
+                color-mix(in srgb, var(--st-link-color) 4%, var(--st-background-color) 96%) 100%
+            );
+        }
+        .hero-fx-label {
+            font-size: 0.78rem;
+            font-weight: 800;
+            color: color-mix(in srgb, var(--st-text-color) 72%, transparent 28%);
+            margin-bottom: 0.18rem;
+        }
+        .hero-fx-value {
+            font-size: 1.08rem;
+            font-weight: 900;
+            color: var(--st-text-color);
+            line-height: 1.15;
+        }
+        .hero-fx-meta {
+            font-size: 0.78rem;
+            color: color-mix(in srgb, var(--st-text-color) 62%, transparent 38%);
+            margin-top: 0.2rem;
         }
         .hero-kicker {
             font-size: 0.78rem;
             color: var(--st-link-color);
             letter-spacing: 0.02em;
             font-weight: 700;
-            margin-bottom: 0.35rem;
+            margin-bottom: 0.24rem;
         }
         .hero-title {
-            font-size: 1.7rem;
+            font-size: 1.76rem;
             font-weight: 950;
             color: var(--st-text-color);
             line-height: 1.08;
-            margin-bottom: 0.35rem;
+            margin-bottom: 0.24rem;
             letter-spacing: 0;
             text-rendering: geometricPrecision;
         }
         .hero-subtitle,
         .muted-copy {
             color: color-mix(in srgb, var(--st-text-color) 72%, transparent 28%);
-            font-size: 0.93rem;
-            line-height: 1.5;
+            font-size: 0.96rem;
+            line-height: 1.38;
         }
         .badge-row {
             display: flex;
             flex-wrap: wrap;
-            gap: 0.45rem;
-            margin-top: 0.75rem;
+            gap: 0.32rem;
+            margin-top: 0.52rem;
         }
         .badge {
             display: inline-flex;
             align-items: center;
             gap: 0.35rem;
-            padding: 0.28rem 0.68rem;
+            padding: 0.22rem 0.54rem;
             border-radius: 999px;
             background: color-mix(in srgb, var(--st-link-color) 10%, var(--st-secondary-background-color) 90%);
             color: var(--st-text-color);
             font-size: 0.78rem;
-            font-weight: 600;
+            font-weight: 700;
         }
         .section-title {
-            font-size: 1.05rem;
-            font-weight: 750;
+            font-size: 1.22rem;
+            font-weight: 860;
             color: var(--st-text-color);
             margin-bottom: 0.2rem;
         }
         div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] {
-            gap: 0.42rem;
+            gap: 0;
             width: 100%;
+            border: 1px solid color-mix(in srgb, var(--st-text-color) 12%, transparent 88%);
+            border-radius: 10px;
+            overflow: hidden;
+            background: color-mix(in srgb, var(--st-background-color) 84%, var(--st-secondary-background-color) 16%);
         }
         div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button {
-            min-height: 2.72rem;
-            border-radius: 14px !important;
-            border: 1px solid color-mix(in srgb, var(--st-text-color) 10%, transparent 90%) !important;
-            background: color-mix(in srgb, var(--st-secondary-background-color) 88%, white 12%) !important;
-            font-weight: 760 !important;
-            font-size: 0.95rem !important;
-            color: color-mix(in srgb, var(--st-text-color) 78%, transparent 22%) !important;
-            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
-            transition: all 120ms ease;
+            position: relative;
+            min-height: 2.58rem;
+            border-radius: 0 !important;
+            border: 0 !important;
+            border-right: 1px solid color-mix(in srgb, var(--st-text-color) 10%, transparent 90%) !important;
+            background: transparent !important;
+            font-weight: 720 !important;
+            font-size: 0.96rem !important;
+            color: #6B7280 !important;
+            box-shadow: none !important;
+            transition: background 120ms ease, color 120ms ease;
+        }
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button:last-child {
+            border-right: 0 !important;
         }
         div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button:hover {
-            border-color: color-mix(in srgb, var(--st-link-color) 35%, transparent 65%) !important;
-            transform: translateY(-1px);
+            background: rgba(17, 24, 39, 0.035) !important;
+            color: color-mix(in srgb, var(--st-text-color) 78%, #6B7280 22%) !important;
         }
-        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-pressed="true"] {
-            background: linear-gradient(135deg, #2563eb, #3b82f6) !important;
-            border-color: #2563eb !important;
-            color: white !important;
-            box-shadow: 0 12px 26px rgba(37, 99, 235, 0.26);
-            font-weight: 850 !important;
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-pressed="true"],
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-checked="true"],
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-selected="true"],
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[data-selected="true"],
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[kind="primary"],
+        div[data-testid="stSegmentedControl"] button[data-testid*="segmented_controlActive"],
+        div[data-testid="stSegmentedControl"] button[data-testid*="Active"],
+        button[data-testid*="segmented_controlActive"],
+        button[data-testid*="Active"][data-testid*="segmented_control"] {
+            background: #EBF5FF !important;
+            color: #1A73E8 !important;
+            font-weight: 860 !important;
+            border-color: transparent !important;
+            box-shadow: inset 4px 0 0 #1A73E8 !important;
+        }
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-pressed="true"] *,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-checked="true"] *,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-selected="true"] *,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[data-selected="true"] *,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[kind="primary"] *,
+        div[data-testid="stSegmentedControl"] button[data-testid*="segmented_controlActive"] *,
+        div[data-testid="stSegmentedControl"] button[data-testid*="Active"] *,
+        button[data-testid*="segmented_controlActive"] *,
+        button[data-testid*="Active"][data-testid*="segmented_control"] * {
+            color: #1A73E8 !important;
+            border-color: transparent !important;
+        }
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-pressed="true"]::before,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-checked="true"]::before,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-selected="true"]::before,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[data-selected="true"]::before,
+        div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[kind="primary"]::before {
+            border-color: transparent !important;
+            background: transparent !important;
         }
         .ui-anchor {
             height: 0;
         }
-        div[data-testid="stElementContainer"]:has(.nav-anchor) + div[data-testid="stElementContainer"] [data-baseweb="button-group"] {
-            gap: 0.7rem;
-        }
-        div[data-testid="stElementContainer"]:has(.nav-anchor) + div[data-testid="stElementContainer"] [data-baseweb="button-group"] > button {
-            min-height: 3.28rem;
-            border-radius: 16px !important;
-            font-size: 1.1rem !important;
-            font-weight: 980 !important;
-            padding-left: 1rem !important;
-            padding-right: 1rem !important;
-            box-shadow: 0 14px 28px rgba(15, 23, 42, 0.08);
-            letter-spacing: 0 !important;
-            text-rendering: geometricPrecision;
-        }
-        div[data-testid="stElementContainer"]:has(.nav-anchor) + div[data-testid="stElementContainer"] [data-baseweb="button-group"] > button[aria-pressed="true"] {
-            box-shadow: 0 16px 32px rgba(37, 99, 235, 0.30);
-        }
-        div[data-testid="stElementContainer"]:has(.currency-anchor) + div[data-testid="stElementContainer"] [data-baseweb="button-group"] > button {
-            min-height: 3rem;
-            font-size: 1rem !important;
-            font-weight: 820 !important;
-        }
         .section-subtitle {
             color: color-mix(in srgb, var(--st-text-color) 68%, transparent 32%);
-            font-size: 0.86rem;
+            font-size: 0.96rem;
             margin-bottom: 0.8rem;
         }
         .spotlight-title {
-            font-size: 1.08rem;
-            font-weight: 800;
+            font-size: 1.18rem;
+            font-weight: 860;
             color: var(--st-text-color);
             margin-bottom: 0.1rem;
         }
         .spotlight-subtitle {
             color: color-mix(in srgb, var(--st-text-color) 72%, transparent 28%);
-            font-size: 0.82rem;
+            font-size: 0.9rem;
             margin-bottom: 0.65rem;
         }
         .spotlight-chip {
@@ -358,13 +587,13 @@ def inject_styles() -> None:
         }
         .spotlight-metric-label {
             color: color-mix(in srgb, var(--st-text-color) 66%, transparent 34%);
-            font-size: 0.76rem;
+            font-size: 0.84rem;
             margin-bottom: 0.16rem;
         }
         .spotlight-metric-value {
             color: var(--st-text-color);
-            font-size: 1.04rem;
-            font-weight: 800;
+            font-size: 1.16rem;
+            font-weight: 860;
             line-height: 1.15;
         }
         .ops-card {
@@ -383,8 +612,8 @@ def inject_styles() -> None:
             background: linear-gradient(90deg, #0f766e, #2dd4bf);
         }
         .ops-title {
-            font-size: 1rem;
-            font-weight: 760;
+            font-size: 1.08rem;
+            font-weight: 820;
             color: var(--st-text-color);
             margin-bottom: 0.16rem;
         }
@@ -414,27 +643,27 @@ def inject_styles() -> None:
             align-items: flex-start;
         }
         .holding-name {
-            font-size: 1.15rem;
-            font-weight: 800;
+            font-size: 1.28rem;
+            font-weight: 860;
             color: var(--st-text-color);
             line-height: 1.18;
             margin-bottom: 0.18rem;
         }
         .holding-code {
             color: color-mix(in srgb, var(--st-text-color) 65%, transparent 35%);
-            font-size: 0.8rem;
+            font-size: 0.88rem;
         }
         .holding-value {
             text-align: right;
         }
         .holding-value-main {
-            font-size: 1.05rem;
-            font-weight: 780;
+            font-size: 1.16rem;
+            font-weight: 840;
             color: var(--st-text-color);
             line-height: 1.15;
         }
         .holding-value-sub {
-            font-size: 0.8rem;
+            font-size: 0.88rem;
             color: color-mix(in srgb, var(--st-text-color) 65%, transparent 35%);
             margin-top: 0.12rem;
         }
@@ -445,18 +674,18 @@ def inject_styles() -> None:
             margin-top: 0.9rem;
         }
         .mini-label {
-            font-size: 0.76rem;
+            font-size: 0.84rem;
             color: color-mix(in srgb, var(--st-text-color) 62%, transparent 38%);
             margin-bottom: 0.12rem;
         }
         .mini-value {
-            font-size: 0.92rem;
-            font-weight: 680;
+            font-size: 1rem;
+            font-weight: 760;
             color: var(--st-text-color);
         }
         .pnl-rate {
-            font-size: 1.08rem;
-            font-weight: 800;
+            font-size: 1.18rem;
+            font-weight: 860;
             letter-spacing: 0;
         }
         .pnl-up {
@@ -467,8 +696,38 @@ def inject_styles() -> None:
         }
         .tiny-note {
             color: color-mix(in srgb, var(--st-text-color) 62%, transparent 38%);
-            font-size: 0.78rem;
+            font-size: 0.86rem;
             margin-top: 0.35rem;
+        }
+        [data-testid="stMetricLabel"] p {
+            font-size: 0.98rem !important;
+            font-weight: 800 !important;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.55rem !important;
+            font-weight: 900 !important;
+        }
+        div[data-testid="stCaptionContainer"] {
+            font-size: 0.92rem !important;
+        }
+        label[data-testid="stWidgetLabel"] p {
+            font-size: 1rem !important;
+            font-weight: 800 !important;
+        }
+        div[data-baseweb="input"] {
+            min-height: 2.58rem;
+            border-radius: 10px !important;
+            border: 1px solid color-mix(in srgb, var(--st-text-color) 12%, transparent 88%) !important;
+            background: color-mix(in srgb, var(--st-background-color) 84%, var(--st-secondary-background-color) 16%) !important;
+            box-shadow: none !important;
+        }
+        div[data-baseweb="input"]:focus-within {
+            border-color: color-mix(in srgb, #1A73E8 35%, transparent 65%) !important;
+            box-shadow: inset 4px 0 0 #1A73E8 !important;
+        }
+        .stTextInput input {
+            font-size: 1rem !important;
+            color: var(--st-text-color) !important;
         }
         @media (prefers-color-scheme: dark) {
             .hero-card,
@@ -564,6 +823,88 @@ def inject_styles() -> None:
             }
             .pnl-down {
                 color: #fca5a5;
+            }
+            .hero-fx-card,
+            [data-testid="stSidebar"] .sidebar-fx {
+                border-color: rgba(96, 165, 250, 0.26);
+                background: linear-gradient(180deg, rgba(59,130,246,0.18), rgba(30,41,59,0.42));
+            }
+            .sidebar-nav-item {
+                color: rgba(229, 231, 235, 0.68);
+            }
+            .sidebar-nav-item:hover {
+                background: rgba(255,255,255,0.055);
+                color: rgba(255,255,255,0.88);
+            }
+            .sidebar-nav-item.active {
+                background: rgba(26, 115, 232, 0.18);
+                color: #93C5FD;
+            }
+            .sidebar-nav-item.active::before {
+                background: #60A5FA;
+            }
+            .filter-nav-list {
+                border-color: rgba(255,255,255,0.10);
+                background: rgba(255,255,255,0.025);
+            }
+            .filter-nav-item {
+                border-right-color: rgba(255,255,255,0.08);
+                color: rgba(229, 231, 235, 0.68);
+            }
+            .filter-nav-item:hover {
+                background: rgba(255,255,255,0.055);
+                color: rgba(255,255,255,0.88);
+            }
+            .filter-nav-item.active {
+                background: rgba(26, 115, 232, 0.18);
+                color: #93C5FD;
+                box-shadow: inset 4px 0 0 #60A5FA;
+            }
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] {
+                border-color: rgba(255,255,255,0.10);
+                background: rgba(255,255,255,0.025);
+            }
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button {
+                border-right-color: rgba(255,255,255,0.08) !important;
+                color: rgba(229, 231, 235, 0.68) !important;
+            }
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button:hover {
+                background: rgba(255,255,255,0.055) !important;
+                color: rgba(255,255,255,0.88) !important;
+            }
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-pressed="true"],
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-checked="true"],
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-selected="true"],
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[data-selected="true"],
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[kind="primary"],
+            div[data-testid="stSegmentedControl"] button[data-testid*="segmented_controlActive"],
+            div[data-testid="stSegmentedControl"] button[data-testid*="Active"],
+            button[data-testid*="segmented_controlActive"],
+            button[data-testid*="Active"][data-testid*="segmented_control"] {
+                background: rgba(26, 115, 232, 0.18) !important;
+                color: #93C5FD !important;
+                border-color: transparent !important;
+                box-shadow: inset 4px 0 0 #60A5FA !important;
+            }
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-pressed="true"] *,
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-checked="true"] *,
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[aria-selected="true"] *,
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[data-selected="true"] *,
+            div[data-testid="stSegmentedControl"] [data-baseweb="button-group"] > button[kind="primary"] *,
+            div[data-testid="stSegmentedControl"] button[data-testid*="segmented_controlActive"] *,
+            div[data-testid="stSegmentedControl"] button[data-testid*="Active"] *,
+            button[data-testid*="segmented_controlActive"] *,
+            button[data-testid*="Active"][data-testid*="segmented_control"] * {
+                color: #93C5FD !important;
+                border-color: transparent !important;
+            }
+            div[data-baseweb="input"] {
+                border-color: rgba(255,255,255,0.10) !important;
+                background: rgba(255,255,255,0.025) !important;
+            }
+            div[data-baseweb="input"]:focus-within {
+                border-color: rgba(96, 165, 250, 0.42) !important;
+                box-shadow: inset 4px 0 0 #60A5FA !important;
             }
         }
         </style>
@@ -1028,10 +1369,31 @@ def build_allocation_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def render_hero(df: pd.DataFrame) -> None:
+def get_usd_cny_snapshot(rate_map: dict[str, FxRate]) -> dict[str, str] | None:
+    rate = rate_map.get("CNY") or rate_map.get("CNH")
+    if rate is None or rate.rate == 0:
+        return None
+    usd_to_cny = (Decimal("1") / rate.rate).quantize(Decimal("0.0001"))
+    return {
+        "pair": "USD/CNY",
+        "value": f"1 USD = {usd_to_cny} CNY",
+        "meta": f"{rate.rate_date.isoformat()} · {rate.source}",
+    }
+
+
+def render_hero(df: pd.DataFrame, usd_cny_snapshot: dict[str, str] | None = None) -> None:
     latest_date = latest_valuation_date(df) or "暂无"
     provider_count = int(df["provider"].nunique()) if not df.empty else 0
     positions_count = int(len(df.index))
+    fx_block = ""
+    if usd_cny_snapshot:
+        fx_block = (
+            "<div class=\"hero-fx-card\">"
+            f"<div class=\"hero-fx-label\">{usd_cny_snapshot['pair']}</div>"
+            f"<div class=\"hero-fx-value\">{usd_cny_snapshot['value']}</div>"
+            f"<div class=\"hero-fx-meta\">{usd_cny_snapshot['meta']}</div>"
+            "</div>"
+        )
     st.markdown(
         f"""
         <div class="hero-card">
@@ -1044,6 +1406,7 @@ def render_hero(df: pd.DataFrame) -> None:
                 <span class="badge">{positions_count} 条持仓</span>
                 <span class="badge">主题跟随系统</span>
             </div>
+            {fx_block}
         </div>
         """,
         unsafe_allow_html=True,
@@ -1075,6 +1438,136 @@ def render_primary_controls(df: pd.DataFrame) -> tuple[str, str]:
             label_visibility="collapsed",
         )
     st.caption(f"当前按每个账户的最新快照统计。最新估值日期：{latest_date or '暂无'}")
+    return display_currency, section
+
+
+def query_param_value(name: str) -> str | None:
+    try:
+        value = st.query_params.get(name)
+    except Exception:
+        return None
+    if isinstance(value, list):
+        return str(value[0]) if value else None
+    return str(value) if value is not None else None
+
+
+def query_param_choice(name: str, options: list[str], default: str) -> str:
+    value = query_param_value(name)
+    if value in options:
+        return value
+    stored = st.session_state.get(name)
+    if stored in options:
+        return str(stored)
+    return default
+
+
+def build_query(**updates: str) -> str:
+    params = {
+        "section": query_param_value("section") or st.session_state.get("main_section", SECTION_OPTIONS[0]),
+        "currency": query_param_value("currency") or st.session_state.get("display_currency", "USD"),
+        "provider": query_param_value("provider") or st.session_state.get("provider", "全部"),
+        "asset": query_param_value("asset") or st.session_state.get("asset", "全部"),
+        "view": query_param_value("view") or st.session_state.get("view", HOLDINGS_VIEW_OPTIONS[0]),
+        "sort": query_param_value("sort") or st.session_state.get("sort", HOLDINGS_SORT_OPTIONS[0]),
+    }
+    params.update({key: value for key, value in updates.items() if value is not None})
+    return "?" + urlencode(params)
+
+
+def render_sidebar_nav(active_section: str, display_currency: str) -> None:
+    items = []
+    for section in SECTION_OPTIONS:
+        params = urlencode({"section": section, "currency": display_currency})
+        active_class = " active" if section == active_section else ""
+        icon = NAV_ICON_SVGS.get(section, "")
+        items.append(
+            f"<a class='sidebar-nav-item{active_class}' href='?{params}' target='_self'>"
+            f"{icon}<span class='sidebar-nav-label'>{section}</span>"
+            "</a>"
+        )
+    st.markdown(
+        (
+            "<nav class='sidebar-nav' aria-label='浏览'>"
+            "<div class='sidebar-nav-title'>浏览</div>"
+            "<div class='sidebar-nav-list'>"
+            + "".join(items)
+            + "</div></nav>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_filter_nav(title: str, param_name: str, options: list[str], active: str) -> None:
+    items = []
+    for option in options:
+        active_class = " active" if option == active else ""
+        href = build_query(**{param_name: option})
+        items.append(f"<a class='filter-nav-item{active_class}' href='{href}' target='_self'>{option}</a>")
+    st.markdown(
+        (
+            f"<div class='filter-nav' style='--filter-count:{len(options)}'>"
+            f"<div class='filter-nav-title'>{title}</div>"
+            "<div class='filter-nav-list'>"
+            + "".join(items)
+            + "</div></div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_currency(active_currency: str, section: str) -> None:
+    items = []
+    for currency in ("USD", "CNY"):
+        params = urlencode({"section": section, "currency": currency})
+        active_class = " active" if currency == active_currency else ""
+        icon = NAV_ICON_SVGS.get(currency, "")
+        items.append(
+            f"<a class='sidebar-nav-item{active_class}' href='?{params}' target='_self'>"
+            f"{icon}<span class='sidebar-nav-label'>{currency}</span>"
+            "</a>"
+        )
+    st.markdown(
+        (
+            "<nav class='sidebar-nav' aria-label='币种'>"
+            "<div class='sidebar-nav-title'>币种</div>"
+            "<div class='sidebar-nav-list'>"
+            + "".join(items)
+            + "</div></nav>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_controls(df: pd.DataFrame) -> tuple[str, str]:
+    latest_date = latest_valuation_date(df)
+    with st.sidebar:
+        st.markdown(
+            "<div class='sidebar-block'><div class='sidebar-kicker'>Navigation</div><div class='sidebar-brand'>LXY的Finsight</div><div class='sidebar-subtitle'>资产、结构、持仓和同步操作</div></div>",
+            unsafe_allow_html=True,
+        )
+        current_fx = st.session_state.get("usd_cny_snapshot")
+        if current_fx:
+            st.markdown(
+                (
+                    "<div class='sidebar-fx'>"
+                    "<div class='sidebar-fx-label'>美元兑人民币</div>"
+                    f"<div class='sidebar-fx-value'>{current_fx['value']}</div>"
+                    f"<div class='sidebar-fx-meta'>{current_fx['meta']}</div>"
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
+        query_section = query_param_value("section")
+        section_default = query_section if query_section in SECTION_OPTIONS else st.session_state.get("main_section", SECTION_OPTIONS[0])
+        section = section_default if section_default in SECTION_OPTIONS else SECTION_OPTIONS[0]
+        query_currency = query_param_value("currency")
+        display_default = query_currency if query_currency in {"USD", "CNY"} else st.session_state.get("display_currency", "USD")
+        render_sidebar_nav(section, display_default)
+        display_currency = display_default if display_default in {"USD", "CNY"} else "USD"
+        render_sidebar_currency(display_currency, section)
+        st.session_state["main_section"] = section
+        st.session_state["display_currency"] = display_currency
+        st.caption(f"最新估值日期：{latest_date or '暂无'}")
     return display_currency, section
 
 
@@ -1274,6 +1767,40 @@ def render_holdings_header(df: pd.DataFrame, display_currency: str) -> tuple[pd.
         key="holdings_sort_mode",
         width="stretch",
     )
+
+    filtered = filter_positions(df, provider, asset, search_text, sort_mode)
+    total_value = filtered["display_value"].sum(skipna=True)
+    total_pnl = filtered["display_pnl"].sum(skipna=True)
+    st.caption(f"当前筛选结果：{len(filtered)} 条，市值 {money(total_value, display_currency)}，盈亏 {metric_money(total_pnl, display_currency)}。")
+    return filtered, 8 if view_mode == "卡片" else 15
+
+
+def render_holdings_header(df: pd.DataFrame, display_currency: str) -> tuple[pd.DataFrame, int]:
+    st.markdown("<div class='section-title'>持仓详情</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-subtitle'>默认提供更适合手机的卡片视图；如果你在桌面上工作，也可以一键切回表格。</div>", unsafe_allow_html=True)
+
+    providers = ["全部"] + sorted(item for item in df["provider"].dropna().unique() if item)
+    provider = query_param_choice("provider", providers, "全部")
+    render_filter_nav("机构筛选", "provider", providers, provider)
+
+    asset_options = asset_filter_options(df)
+    asset = query_param_choice("asset", asset_options, "全部")
+    render_filter_nav("资产筛选", "asset", asset_options, asset)
+
+    c1, c2 = st.columns([1.2, 1])
+    with c1:
+        search_text = st.text_input("搜索代码或名称", value=st.session_state.get("holdings_search", ""), key="holdings_search")
+    with c2:
+        view_mode = query_param_choice("view", HOLDINGS_VIEW_OPTIONS, "卡片")
+        render_filter_nav("展示方式", "view", HOLDINGS_VIEW_OPTIONS, view_mode)
+
+    sort_mode = query_param_choice("sort", HOLDINGS_SORT_OPTIONS, HOLDINGS_SORT_OPTIONS[0])
+    render_filter_nav("排序方式", "sort", HOLDINGS_SORT_OPTIONS, sort_mode)
+
+    st.session_state["holdings_provider"] = provider
+    st.session_state["holdings_asset"] = asset
+    st.session_state["holdings_view_mode"] = view_mode
+    st.session_state["holdings_sort_mode"] = sort_mode
 
     filtered = filter_positions(df, provider, asset, search_text, sort_mode)
     total_value = filtered["display_value"].sum(skipna=True)
@@ -1662,20 +2189,20 @@ def main() -> None:
     if not using_supabase:
         st.info("当前使用本地样例数据；配置 Supabase 后会自动读取云端数据库。")
 
-    render_flash()
-    render_hero(positions)
-
     positions, fx_note, rate_map = apply_fx_fallback(positions, fx_rates)
     positions = add_pnl_columns(positions)
+    st.session_state["usd_cny_snapshot"] = get_usd_cny_snapshot(rate_map)
+
+    render_flash()
+    render_hero(positions, st.session_state.get("usd_cny_snapshot"))
 
     if positions.empty:
         render_operations_panel(imports, errors)
         st.info("还没有持仓数据。")
         st.stop()
 
-    display_currency, section = render_primary_controls(positions)
+    display_currency, section = render_sidebar_controls(positions)
     positions = add_display_columns(positions, display_currency, rate_map)
-    st.caption(f"汇率状态：{fx_note}")
 
     if section == "总览":
         render_overview(positions, display_currency)
