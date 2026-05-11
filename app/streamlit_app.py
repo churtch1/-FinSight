@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import sys
 import tempfile
 from dataclasses import asdict
@@ -13,6 +16,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -77,6 +81,8 @@ HOLDINGS_SORT_OPTIONS = ["金额↓", "金额↑", "盈亏率↓", "盈亏率↑
 FLASH_KEY = "dashboard_flash"
 HSBC_PREVIEW_KEY = "hsbc_preview_rows"
 HSBC_PREVIEW_NAME_KEY = "hsbc_preview_name"
+PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
+AUTH_COOKIE_NAME = "lxy_finsight_auth"
 
 NAV_ICON_SVGS = {
     "总览": '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect></svg>',
@@ -913,11 +919,42 @@ def inject_styles() -> None:
     )
 
 
+def auth_cookie_value(password: str) -> str:
+    return hmac.new(password.encode("utf-8"), b"lxy-finsight-auth-v1", hashlib.sha256).hexdigest()
+
+
+def has_valid_auth_cookie(settings: Settings) -> bool:
+    if not settings.streamlit_password:
+        return True
+    try:
+        cookie_value = st.context.cookies.get(AUTH_COOKIE_NAME, "")
+    except Exception:
+        return False
+    return hmac.compare_digest(str(cookie_value), auth_cookie_value(settings.streamlit_password))
+
+
+def set_auth_cookie(settings: Settings) -> None:
+    token = auth_cookie_value(settings.streamlit_password)
+    cookie_name = json.dumps(AUTH_COOKIE_NAME)
+    cookie_value = json.dumps(token)
+    components.html(
+        f"""
+        <script>
+        const secure = window.location.protocol === "https:" ? "; Secure" : "";
+        document.cookie = {cookie_name} + "=" + {cookie_value} + "; Max-Age=604800; Path=/; SameSite=Lax" + secure;
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 def require_password() -> bool:
     settings = get_settings()
     if not settings.streamlit_password:
         return True
-    if st.session_state.get("authenticated"):
+    if st.session_state.get("authenticated") or has_valid_auth_cookie(settings):
+        st.session_state["authenticated"] = True
         return True
     with st.form("login"):
         st.subheader("LXY的Finsight")
@@ -925,7 +962,8 @@ def require_password() -> bool:
         submitted = st.form_submit_button("进入", type="primary", icon=":material/lock_open:")
     if submitted and password == settings.streamlit_password:
         st.session_state["authenticated"] = True
-        st.rerun()
+        set_auth_cookie(settings)
+        return True
     elif submitted:
         st.error("密码不正确。")
     return False
@@ -1623,6 +1661,7 @@ def render_spotlight_panel(df: pd.DataFrame, spec: dict[str, str], display_curre
             build_spotlight_chart(grouped, spec["accent"], display_currency),
             use_container_width=True,
             theme="streamlit",
+            config=PLOTLY_CONFIG,
         )
 
 
@@ -1637,8 +1676,8 @@ def render_allocation(df: pd.DataFrame, display_currency: str) -> None:
     st.markdown("<div class='section-title'>结构图</div>", unsafe_allow_html=True)
     allocation_fig = build_allocation_chart(df)
     provider_fig = build_provider_chart(df)
-    st.plotly_chart(allocation_fig, use_container_width=True, theme="streamlit")
-    st.plotly_chart(provider_fig, use_container_width=True, theme="streamlit")
+    st.plotly_chart(allocation_fig, use_container_width=True, theme="streamlit", config=PLOTLY_CONFIG)
+    st.plotly_chart(provider_fig, use_container_width=True, theme="streamlit", config=PLOTLY_CONFIG)
 
 
 def render_summary_tables(df: pd.DataFrame, display_currency: str) -> None:
