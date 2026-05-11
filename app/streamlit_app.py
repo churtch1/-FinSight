@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
+import tempfile
+from dataclasses import asdict
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import plotly.express as px
@@ -15,9 +18,19 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from portfolio_mvp.config import get_settings
+from portfolio_mvp.config import Settings, get_settings
 from portfolio_mvp.db import MissingSupabaseConfig, fetch_dashboard_data, get_supabase
 from portfolio_mvp.fx import FxRate, fetch_online_usd_rates, latest_rate_from_rows
+from portfolio_mvp.integrations.ibkr import sync_ibkr_data
+from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
+from portfolio_mvp.repository import (
+    complete_import,
+    create_import_record,
+    file_sha256,
+    import_normalized_rows,
+    log_import_error,
+    upsert_account,
+)
 
 
 INSTRUMENT_NAME_ZH = {
@@ -83,6 +96,10 @@ PANEL_SPECS = [
     },
 ]
 
+FLASH_KEY = "dashboard_flash"
+HSBC_PREVIEW_KEY = "hsbc_preview_rows"
+HSBC_PREVIEW_NAME_KEY = "hsbc_preview_name"
+
 
 st.set_page_config(page_title="LXY的Finsight", layout="wide")
 
@@ -140,6 +157,20 @@ def require_password() -> bool:
     elif submitted:
         st.error("密码不正确。")
     return False
+
+
+def push_flash(level: str, message: str) -> None:
+    st.session_state[FLASH_KEY] = {"level": level, "message": message}
+
+
+def render_flash() -> None:
+    flash = st.session_state.pop(FLASH_KEY, None)
+    if not flash:
+        return
+    level = str(flash.get("level") or "info")
+    message = str(flash.get("message") or "")
+    renderer = getattr(st, level, st.info)
+    renderer(message)
 
 
 @st.cache_data(ttl=60)
@@ -831,8 +862,155 @@ def render_import_status(imports: pd.DataFrame, errors: pd.DataFrame) -> None:
             st.dataframe(errors, use_container_width=True, hide_index=True)
 
 
+def can_write_from_dashboard(settings: Settings) -> bool:
+    return settings.has_supabase_write_config
+
+
+def sync_ibkr_via_dashboard(account: str, settings: Settings) -> str:
+    client = get_supabase(use_service_role=True, settings=settings)
+    sync_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    import_id = create_import_record(
+        client,
+        source="ibkr",
+        source_type="api",
+        file_name=None,
+        file_hash=f"ibkr-{account}-{sync_started_at}",
+    )
+
+    try:
+        data = sync_ibkr_data(account=account, settings=settings)
+        for account_name in data.accounts:
+            summary = data.account_summaries.get(account_name, {})
+            upsert_account(client, "IBKR", account_name, summary.get("BaseCurrency", "USD") or "USD")
+
+        imported = import_normalized_rows(client, data.rows, import_id)
+        if imported == len(data.rows):
+            complete_import(client, import_id, imported, "completed")
+        else:
+            failed = len(data.rows) - imported
+            complete_import(client, import_id, imported, "needs_review", f"{failed} rows failed during import.")
+        return f"IBKR 同步完成：{imported}/{len(data.rows)} 条，覆盖 {len(data.accounts)} 个账户。"
+    except Exception as exc:
+        log_import_error(client, import_id, None, {"account": account}, str(exc))
+        complete_import(client, import_id, 0, "failed", str(exc))
+        raise RuntimeError(f"IBKR 同步失败：{exc}") from exc
+
+
+def _printable(value: object) -> object:
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def preview_rows_frame(rows: list[object]) -> pd.DataFrame:
+    return pd.DataFrame([{key: _printable(value) for key, value in asdict(row).items()} for row in rows])
+
+
+def import_hsbc_pdf_via_dashboard(file_name: str, pdf_bytes: bytes, settings: Settings, dry_run: bool) -> tuple[str, pd.DataFrame]:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as handle:
+        handle.write(pdf_bytes)
+        temp_path = Path(handle.name)
+
+    try:
+        rows = parse_hsbc_cn_pdf(temp_path)
+        preview = preview_rows_frame(rows)
+
+        if dry_run:
+            return f"预检完成：识别到 {len(rows)} 条记录。", preview
+
+        client = get_supabase(use_service_role=True, settings=settings)
+        import_id = create_import_record(
+            client,
+            source="hsbc_china",
+            source_type="pdf",
+            file_name=file_name,
+            file_hash=file_sha256(temp_path),
+        )
+        if not rows:
+            log_import_error(
+                client,
+                import_id,
+                None,
+                {"file_name": file_name},
+                "No recognizable HSBC China rows found. Add a desensitized sample PDF to improve parser rules.",
+            )
+            complete_import(client, import_id, 0, "needs_review", "No recognizable rows found.")
+            raise RuntimeError("没有识别到可导入的数据，这次导入已标记为 needs_review。")
+
+        imported = import_normalized_rows(client, rows, import_id)
+        complete_import(client, import_id, imported, "completed")
+        return f"汇丰 PDF 导入完成：{imported} 条。", preview
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def render_hsbc_preview() -> None:
+    preview = st.session_state.get(HSBC_PREVIEW_KEY)
+    file_name = st.session_state.get(HSBC_PREVIEW_NAME_KEY)
+    if preview is None or not isinstance(preview, pd.DataFrame) or preview.empty:
+        return
+    st.caption(f"最近一次 PDF 预检：{file_name}")
+    st.dataframe(preview, use_container_width=True, hide_index=True)
+
+
+def render_operations_panel() -> None:
+    settings = get_settings()
+    st.subheader("操作台")
+    st.caption("这里适合做手动更新。IBKR 按钮适合本机运行时使用；汇丰 PDF 上传支持云端使用，手机也可以直接上传 iCloud 中的 PDF。")
+
+    if not can_write_from_dashboard(settings):
+        st.info("当前环境只有只读权限。要启用这里的按钮，请在当前 Streamlit 环境中配置 SUPABASE_SERVICE_ROLE_KEY。")
+        return
+
+    left, right = st.columns(2)
+    with left:
+        with st.container(border=True):
+            st.markdown("**IBKR 同步**")
+            st.caption("先打开并登录本机上的 IB Gateway/TWS，再点击同步。这个按钮主要用于你本地运行的看板。")
+            account = st.text_input("同步账户", value="all", key="ibkr_sync_account")
+            if st.button("同步 IBKR", key="sync_ibkr_button", use_container_width=True, type="primary"):
+                try:
+                    with st.spinner("正在同步 IBKR..."):
+                        message = sync_ibkr_via_dashboard(account.strip() or "all", settings)
+                    load_data.clear()
+                    push_flash("success", message)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    with right:
+        with st.container(border=True):
+            st.markdown("**汇丰 PDF 上传**")
+            st.caption("这个入口支持云端使用。你在手机上打开看板后，可以直接上传 iCloud 里的 PDF。")
+            uploaded_pdf = st.file_uploader("上传最新汇丰 PDF", type=["pdf"], key="hsbc_pdf_uploader")
+            dry_run = st.checkbox("先预检，不写数据库", value=False, key="hsbc_pdf_dry_run")
+            button_label = "预检汇丰 PDF" if dry_run else "导入汇丰 PDF"
+            if st.button(button_label, key="import_hsbc_button", use_container_width=True, disabled=uploaded_pdf is None):
+                try:
+                    with st.spinner("正在解析 PDF..."):
+                        message, preview = import_hsbc_pdf_via_dashboard(
+                            uploaded_pdf.name,
+                            uploaded_pdf.getvalue(),
+                            settings,
+                            dry_run=dry_run,
+                        )
+                    st.session_state[HSBC_PREVIEW_KEY] = preview
+                    st.session_state[HSBC_PREVIEW_NAME_KEY] = uploaded_pdf.name
+                    if dry_run:
+                        st.success(message)
+                    else:
+                        load_data.clear()
+                        push_flash("success", message)
+                        st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+            render_hsbc_preview()
+
+
 def render_upload_hint() -> None:
-    with st.expander("导入入口"):
+    with st.expander("命令行入口"):
         st.code(
             "python scripts/load_fx_rates.py sample_data/fx_rates.csv\n"
             "python scripts/import_hsbc_pdf.py HSBC/资产配置报告.pdf\n"
@@ -848,6 +1026,7 @@ def main() -> None:
 
     st.title("LXY的Finsight")
     st.caption("统一浏览 IBKR 与 HSBC China 的最新持仓、币种结构、资产类别和盈亏情况。")
+    render_flash()
 
     try:
         positions, imports, errors, fx_rates, using_supabase = load_data()
@@ -858,12 +1037,15 @@ def main() -> None:
     if not using_supabase:
         st.info("当前使用本地样例数据；配置 Supabase 后会自动读取云端数据库。")
 
+    render_operations_panel()
+
     positions, fx_note, rate_map = apply_fx_fallback(positions, fx_rates)
     positions = add_pnl_columns(positions)
 
     if positions.empty:
         st.info("还没有持仓数据。")
         render_upload_hint()
+        render_import_status(imports, errors)
         st.stop()
 
     display_currency = render_toolbar(positions)

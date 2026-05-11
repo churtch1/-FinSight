@@ -48,6 +48,20 @@ FX_API_URL = "https://open.er-api.com/v6/latest/USD"
 
 不要把 `SUPABASE_SERVICE_ROLE_KEY` 放到公开的云端看板里。
 
+如果你希望在云端看板里直接上传汇丰 PDF 并写回数据库，则需要额外在 Secrets 中配置：
+
+```toml
+SUPABASE_SERVICE_ROLE_KEY = "your-service-role-key"
+```
+
+这会让云端应用具备写库能力，所以更适合下面这种情况：
+
+- 这个看板只有你自己使用
+- 你已经设置了访问密码
+- 你接受“上传 PDF 入口在云端服务器执行解析和写入”
+
+如果你只想远程看数据、不想让云端具备写权限，那就不要配置这个 key。
+
 ## 3. Streamlit Community Cloud 上线参数
 
 创建应用时建议这样填写：
@@ -65,7 +79,7 @@ FX_API_URL = "https://open.er-api.com/v6/latest/USD"
 因此日常更新流程是：
 
 1. 在你自己的电脑上同步 `IBKR`
-2. 在你自己的电脑上导入汇丰 PDF
+2. 在你自己的电脑上导入汇丰 PDF，或者在云端看板中直接上传 PDF
 3. 数据写入 `Supabase`
 4. 手机或其他设备打开 Streamlit 云端链接查看最新看板
 
