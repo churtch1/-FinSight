@@ -1,11 +1,12 @@
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
 from portfolio_mvp.config import Settings
-from portfolio_mvp.integrations.ibkr import sync_ibkr_data
+from portfolio_mvp.integrations.ibkr import _ensure_thread_event_loop, sync_ibkr_data
 
 
 class FakeIB:
@@ -115,3 +116,32 @@ def test_sync_ibkr_data_rejects_unknown_account() -> None:
             settings=Settings(),
             ib_factory=FakeIB,
         )
+
+
+def test_ensure_thread_event_loop_creates_one_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = {"called": False, "set": None}
+
+    class FakePolicy:
+        @staticmethod
+        def get_event_loop():
+            raise RuntimeError("no current event loop")
+
+    def fake_get_running_loop():
+        raise RuntimeError("no running event loop")
+
+    def fake_new_event_loop():
+        created["called"] = True
+        return "loop-object"
+
+    def fake_set_event_loop(loop):
+        created["set"] = loop
+
+    monkeypatch.setattr(asyncio, "get_running_loop", fake_get_running_loop)
+    monkeypatch.setattr(asyncio, "get_event_loop_policy", lambda: FakePolicy())
+    monkeypatch.setattr(asyncio, "new_event_loop", fake_new_event_loop)
+    monkeypatch.setattr(asyncio, "set_event_loop", fake_set_event_loop)
+
+    _ensure_thread_event_loop()
+
+    assert created["called"] is True
+    assert created["set"] == "loop-object"

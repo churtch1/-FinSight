@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import warnings
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -45,6 +47,7 @@ def sync_ibkr_data(
     ib_factory: Callable[[], Any] | None = None,
 ) -> IbkrSyncData:
     settings = settings or get_settings()
+    _ensure_thread_event_loop()
     ib_factory = ib_factory or _load_ib_factory()
 
     ib = ib_factory()
@@ -71,6 +74,22 @@ def sync_ibkr_data(
         return IbkrSyncData(accounts=accounts, account_summaries=account_summaries, rows=rows)
     finally:
         ib.disconnect()
+
+
+def _ensure_thread_event_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+        return
+    except RuntimeError:
+        pass
+
+    policy = asyncio.get_event_loop_policy()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            policy.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def _load_ib_factory() -> Callable[[], Any]:
