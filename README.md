@@ -29,6 +29,8 @@ FinSight 是一个个人资产看板项目，用来把分散在券商、银行 P
 
 ![操作台界面](docs/images/dashboard-ops.png)
 
+![持仓筛选界面](docs/images/dashboard-holdings-sidebar-crop.png)
+
 ## 典型使用流程
 
 ```text
