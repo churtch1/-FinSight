@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
@@ -65,3 +67,42 @@ def test_aggregate_spotlight_positions_sums_value_cost_and_pnl() -> None:
     assert row["display_cost"] == 1200.0
     assert row["display_pnl"] == 300.0
     assert round(float(row["pnl_pct"]), 4) == 0.25
+
+
+def test_has_valid_auth_query_accepts_signed_unexpired_token(monkeypatch) -> None:
+    dashboard = load_dashboard_module()
+    settings = SimpleNamespace(streamlit_password="secret")
+    expires_at = 4102444800
+    signature = dashboard.auth_query_signature("secret", expires_at)
+    params = {
+        dashboard.AUTH_QUERY_TOKEN: signature,
+        dashboard.AUTH_QUERY_EXPIRES: str(expires_at),
+    }
+
+    monkeypatch.setattr(dashboard, "query_param_value", lambda name: params.get(name))
+
+    assert dashboard.has_valid_auth_query(settings) is True
+
+
+def test_build_query_preserves_auth_params(monkeypatch) -> None:
+    dashboard = load_dashboard_module()
+    params = {
+        "section": dashboard.SECTION_OPTIONS[0],
+        "currency": "USD",
+        "provider": "全部",
+        "asset": "全部",
+        "view": dashboard.HOLDINGS_VIEW_OPTIONS[0],
+        "sort": dashboard.HOLDINGS_SORT_OPTIONS[0],
+        dashboard.AUTH_QUERY_TOKEN: "signed-token",
+        dashboard.AUTH_QUERY_EXPIRES: "4102444800",
+    }
+
+    monkeypatch.setattr(dashboard, "query_param_value", lambda name: params.get(name))
+
+    query = dashboard.build_query(section=dashboard.SECTION_OPTIONS[-1], currency="CNY")
+    parsed = parse_qs(urlparse(query).query)
+
+    assert parsed["section"] == [dashboard.SECTION_OPTIONS[-1]]
+    assert parsed["currency"] == ["CNY"]
+    assert parsed[dashboard.AUTH_QUERY_TOKEN] == ["signed-token"]
+    assert parsed[dashboard.AUTH_QUERY_EXPIRES] == ["4102444800"]

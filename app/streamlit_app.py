@@ -6,7 +6,7 @@ import json
 import sys
 import tempfile
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -83,6 +83,9 @@ HSBC_PREVIEW_KEY = "hsbc_preview_rows"
 HSBC_PREVIEW_NAME_KEY = "hsbc_preview_name"
 PLOTLY_CONFIG = {"displayModeBar": False, "responsive": True}
 AUTH_COOKIE_NAME = "lxy_finsight_auth"
+AUTH_QUERY_TOKEN = "auth"
+AUTH_QUERY_EXPIRES = "auth_exp"
+AUTH_DURATION = timedelta(days=7)
 
 NAV_ICON_SVGS = {
     "总览": '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="3" width="7" height="7" rx="1.5"></rect><rect x="14" y="14" width="7" height="7" rx="1.5"></rect><rect x="3" y="14" width="7" height="7" rx="1.5"></rect></svg>',
@@ -923,6 +926,34 @@ def auth_cookie_value(password: str) -> str:
     return hmac.new(password.encode("utf-8"), b"lxy-finsight-auth-v1", hashlib.sha256).hexdigest()
 
 
+def auth_query_signature(password: str, expires_at: int) -> str:
+    payload = f"lxy-finsight-auth-v1:{expires_at}".encode("utf-8")
+    return hmac.new(password.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+
+
+def auth_query_payload(settings: Settings) -> tuple[str, str]:
+    expires_at = int((datetime.now(timezone.utc) + AUTH_DURATION).timestamp())
+    signature = auth_query_signature(settings.streamlit_password, expires_at)
+    return signature, str(expires_at)
+
+
+def has_valid_auth_query(settings: Settings) -> bool:
+    if not settings.streamlit_password:
+        return True
+    signature = query_param_value(AUTH_QUERY_TOKEN)
+    expires_raw = query_param_value(AUTH_QUERY_EXPIRES)
+    if not signature or not expires_raw:
+        return False
+    try:
+        expires_at = int(expires_raw)
+    except (TypeError, ValueError):
+        return False
+    if expires_at < int(datetime.now(timezone.utc).timestamp()):
+        return False
+    expected = auth_query_signature(settings.streamlit_password, expires_at)
+    return hmac.compare_digest(signature, expected)
+
+
 def has_valid_auth_cookie(settings: Settings) -> bool:
     if not settings.streamlit_password:
         return True
@@ -949,6 +980,15 @@ def set_auth_cookie(settings: Settings) -> None:
     )
 
 
+def ensure_auth_query(settings: Settings) -> bool:
+    if has_valid_auth_query(settings):
+        return False
+    signature, expires_at = auth_query_payload(settings)
+    st.query_params[AUTH_QUERY_TOKEN] = signature
+    st.query_params[AUTH_QUERY_EXPIRES] = expires_at
+    return True
+
+
 def require_password() -> bool:
     settings = get_settings()
     if not settings.streamlit_password:
@@ -966,6 +1006,40 @@ def require_password() -> bool:
         return True
     elif submitted:
         st.error("密码不正确。")
+    return False
+
+
+def require_password() -> bool:
+    settings = get_settings()
+    if not settings.streamlit_password:
+        return True
+
+    authenticated = (
+        st.session_state.get("authenticated")
+        or has_valid_auth_cookie(settings)
+        or has_valid_auth_query(settings)
+    )
+    if authenticated:
+        st.session_state["authenticated"] = True
+        query_changed = ensure_auth_query(settings)
+        if not has_valid_auth_cookie(settings):
+            set_auth_cookie(settings)
+        if query_changed:
+            st.rerun()
+        return True
+
+    with st.form("login"):
+        st.subheader("LXY鐨凢insight")
+        password = st.text_input("璁块棶瀵嗙爜", type="password")
+        submitted = st.form_submit_button("杩涘叆", type="primary", icon=":material/lock_open:")
+
+    if submitted and password == settings.streamlit_password:
+        st.session_state["authenticated"] = True
+        ensure_auth_query(settings)
+        set_auth_cookie(settings)
+        st.rerun()
+    elif submitted:
+        st.error("瀵嗙爜涓嶆纭€?")
     return False
 
 
@@ -1568,6 +1642,68 @@ def render_sidebar_currency(active_currency: str, section: str) -> None:
         (
             "<nav class='sidebar-nav' aria-label='币种'>"
             "<div class='sidebar-nav-title'>币种</div>"
+            "<div class='sidebar-nav-list'>"
+            + "".join(items)
+            + "</div></nav>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def build_query(**updates: str) -> str:
+    params = {
+        "section": query_param_value("section") or st.session_state.get("main_section", SECTION_OPTIONS[0]),
+        "currency": query_param_value("currency") or st.session_state.get("display_currency", "USD"),
+        "provider": query_param_value("provider") or st.session_state.get("provider", "鍏ㄩ儴"),
+        "asset": query_param_value("asset") or st.session_state.get("asset", "鍏ㄩ儴"),
+        "view": query_param_value("view") or st.session_state.get("view", HOLDINGS_VIEW_OPTIONS[0]),
+        "sort": query_param_value("sort") or st.session_state.get("sort", HOLDINGS_SORT_OPTIONS[0]),
+        AUTH_QUERY_TOKEN: query_param_value(AUTH_QUERY_TOKEN),
+        AUTH_QUERY_EXPIRES: query_param_value(AUTH_QUERY_EXPIRES),
+    }
+    params.update({key: value for key, value in updates.items() if value is not None})
+    clean_params = {key: value for key, value in params.items() if value not in (None, "")}
+    return "?" + urlencode(clean_params)
+
+
+def render_sidebar_nav(active_section: str, display_currency: str) -> None:
+    items = []
+    for section in SECTION_OPTIONS:
+        params = build_query(section=section, currency=display_currency)
+        active_class = " active" if section == active_section else ""
+        icon = NAV_ICON_SVGS.get(section, "")
+        items.append(
+            f"<a class='sidebar-nav-item{active_class}' href='{params}' target='_self'>"
+            f"{icon}<span class='sidebar-nav-label'>{section}</span>"
+            "</a>"
+        )
+    st.markdown(
+        (
+            "<nav class='sidebar-nav' aria-label='娴忚'>"
+            "<div class='sidebar-nav-title'>娴忚</div>"
+            "<div class='sidebar-nav-list'>"
+            + "".join(items)
+            + "</div></nav>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_currency(active_currency: str, section: str) -> None:
+    items = []
+    for currency in ("USD", "CNY"):
+        params = build_query(section=section, currency=currency)
+        active_class = " active" if currency == active_currency else ""
+        icon = NAV_ICON_SVGS.get(currency, "")
+        items.append(
+            f"<a class='sidebar-nav-item{active_class}' href='{params}' target='_self'>"
+            f"{icon}<span class='sidebar-nav-label'>{currency}</span>"
+            "</a>"
+        )
+    st.markdown(
+        (
+            "<nav class='sidebar-nav' aria-label='甯佺'>"
+            "<div class='sidebar-nav-title'>甯佺</div>"
             "<div class='sidebar-nav-list'>"
             + "".join(items)
             + "</div></nav>"
