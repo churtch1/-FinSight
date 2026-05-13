@@ -1174,7 +1174,7 @@ def load_sample_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Dat
     sample_path = ROOT / "sample_data" / "positions_demo.csv"
     df = normalize_positions(pd.read_csv(sample_path)) if sample_path.exists() else empty_positions()
     imports = pd.DataFrame(
-        [{"source": "demo", "source_type": "csv", "status": "local_sample", "rows_imported": len(df)}]
+        [{"source": "demo", "source_type": "csv", "status": "demo_sample", "rows_imported": len(df)}]
     )
     errors = pd.DataFrame()
     fx_rates = pd.DataFrame(
@@ -1493,10 +1493,11 @@ def get_usd_cny_snapshot(rate_map: dict[str, FxRate]) -> dict[str, str] | None:
     }
 
 
-def render_hero(df: pd.DataFrame, usd_cny_snapshot: dict[str, str] | None = None) -> None:
+def render_hero(df: pd.DataFrame, usd_cny_snapshot: dict[str, str] | None = None, demo_mode: bool = False) -> None:
     latest_date = latest_valuation_date(df) or "暂无"
     provider_count = int(df["provider"].nunique()) if not df.empty else 0
     positions_count = int(len(df.index))
+    mode_badge = "<span class='badge'>演示模式</span>" if demo_mode else ""
     fx_block = ""
     if usd_cny_snapshot:
         fx_block = (
@@ -1517,6 +1518,7 @@ def render_hero(df: pd.DataFrame, usd_cny_snapshot: dict[str, str] | None = None
                 <span class="badge">{provider_count} 家机构</span>
                 <span class="badge">{positions_count} 条持仓</span>
                 <span class="badge">主题跟随系统</span>
+                {mode_badge}
             </div>
             {fx_block}
         </div>
@@ -2443,14 +2445,14 @@ def main() -> None:
         st.stop()
 
     if not using_supabase:
-        st.info("当前使用本地样例数据；配置 Supabase 后会自动读取云端数据库。")
+        st.warning("当前是演示模式，页面展示的是仓库自带的 demo 样例数据，不是你的真实持仓。配置 Supabase 后会自动读取你的云端资产数据。")
 
     positions, fx_note, rate_map = apply_fx_fallback(positions, fx_rates)
     positions = add_pnl_columns(positions)
     st.session_state["usd_cny_snapshot"] = get_usd_cny_snapshot(rate_map)
 
     render_flash()
-    render_hero(positions, st.session_state.get("usd_cny_snapshot"))
+    render_hero(positions, st.session_state.get("usd_cny_snapshot"), demo_mode=not using_supabase)
 
     if positions.empty:
         render_operations_panel(imports, errors)
