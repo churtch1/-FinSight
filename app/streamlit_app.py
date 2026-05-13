@@ -2350,6 +2350,87 @@ def render_structure(df: pd.DataFrame, display_currency: str) -> None:
     render_summary_tables(df, display_currency)
 
 
+# Override earlier mojibake definitions with clean UI copy.
+def require_password() -> bool:
+    settings = get_settings()
+    if not settings.streamlit_password:
+        return True
+
+    authenticated = (
+        st.session_state.get("authenticated")
+        or has_valid_auth_cookie(settings)
+        or has_valid_auth_query(settings)
+    )
+    if authenticated:
+        st.session_state["authenticated"] = True
+        query_changed = ensure_auth_query(settings)
+        if not has_valid_auth_cookie(settings):
+            set_auth_cookie(settings)
+        if query_changed:
+            st.rerun()
+        return True
+
+    with st.form("login"):
+        st.subheader("LXY的Finsight")
+        password = st.text_input("访问密码", type="password")
+        submitted = st.form_submit_button("进入", type="primary", icon=":material/lock_open:")
+
+    if submitted and password == settings.streamlit_password:
+        st.session_state["authenticated"] = True
+        ensure_auth_query(settings)
+        set_auth_cookie(settings)
+        st.rerun()
+    elif submitted:
+        st.error("密码不正确。")
+    return False
+
+
+def render_sidebar_nav(active_section: str, display_currency: str) -> None:
+    items = []
+    for section in SECTION_OPTIONS:
+        params = build_query(section=section, currency=display_currency)
+        active_class = " active" if section == active_section else ""
+        icon = NAV_ICON_SVGS.get(section, "")
+        items.append(
+            f"<a class='sidebar-nav-item{active_class}' href='{params}' target='_self'>"
+            f"{icon}<span class='sidebar-nav-label'>{section}</span>"
+            "</a>"
+        )
+    st.markdown(
+        (
+            "<nav class='sidebar-nav' aria-label='浏览'>"
+            "<div class='sidebar-nav-title'>浏览</div>"
+            "<div class='sidebar-nav-list'>"
+            + "".join(items)
+            + "</div></nav>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar_currency(active_currency: str, section: str) -> None:
+    items = []
+    for currency in ("USD", "CNY"):
+        params = build_query(section=section, currency=currency)
+        active_class = " active" if currency == active_currency else ""
+        icon = NAV_ICON_SVGS.get(currency, "")
+        items.append(
+            f"<a class='sidebar-nav-item{active_class}' href='{params}' target='_self'>"
+            f"{icon}<span class='sidebar-nav-label'>{currency}</span>"
+            "</a>"
+        )
+    st.markdown(
+        (
+            "<nav class='sidebar-nav' aria-label='币种'>"
+            "<div class='sidebar-nav-title'>币种</div>"
+            "<div class='sidebar-nav-list'>"
+            + "".join(items)
+            + "</div></nav>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
 def main() -> None:
     inject_styles()
     if not require_password():
