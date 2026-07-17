@@ -40,6 +40,7 @@ from portfolio_mvp.integrations.ibkr import sync_ibkr_data
 from portfolio_mvp.market_quotes import MarketQuote, YahooMarketQuoteProvider, normalize_us_symbol
 from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
 from portfolio_mvp.parsers.manual_positions import parse_manual_position_records
+from portfolio_mvp.models import NormalizedRow
 from portfolio_mvp.repository import (
     complete_import,
     create_import_record,
@@ -2426,6 +2427,47 @@ def build_manual_position_rows(source_label: str, records: list[dict[str, str]],
     )
 
 
+def _snapshot_identity(code: object, name: object, currency: object) -> tuple[str, str]:
+    identifier = str(code or "").strip() or str(name or "").strip()
+    return identifier.casefold(), str(currency or "").strip().upper()
+
+
+def merge_partial_snapshot_rows(rows: list[NormalizedRow], previous_positions: list[dict[str, Any]]) -> list[NormalizedRow]:
+    """Carry forward holdings absent from a partial bank-app screenshot."""
+    if not rows:
+        return rows
+    incoming = {_snapshot_identity(row.instrument_code, row.instrument_name, row.currency) for row in rows}
+    carried: list[NormalizedRow] = []
+    for position in previous_positions:
+        instrument = position.get("instruments") or {}
+        code = str(instrument.get("symbol") or "")
+        name = str(instrument.get("name") or code or "")
+        currency = str(position.get("currency") or "").upper()
+        if not name or _snapshot_identity(code, name, currency) in incoming:
+            continue
+        decimal = lambda value: Decimal(str(value)) if value is not None else None
+        amount, quantity, price = (decimal(position.get(key)) for key in ("market_value_original", "quantity", "price_original"))
+        if amount is None or quantity is None or price is None:
+            continue
+        carried.append(NormalizedRow(account_name=rows[0].account_name, provider=rows[0].provider, date=rows[0].date, type="position_snapshot", instrument_code=code, instrument_name=name, isin=str(instrument.get("isin") or ""), asset_type=str(instrument.get("asset_type") or "other"), quantity=quantity, price=price, amount=amount, currency=currency, fee=Decimal("0"), tax=Decimal("0"), description="Carried forward from the previous partial screenshot snapshot.", cost=decimal(position.get("cost_original")), unrealized_pnl=decimal(position.get("unrealized_pnl_original")), income=decimal(position.get("income_original")), total_pnl=decimal(position.get("total_pnl_original")), quantity_source=str(position.get("quantity_source") or "reported"), estimate_note=str(position.get("estimate_note") or "")))
+    return carried + rows
+
+
+def merge_manual_rows_with_latest_snapshot(client: object, rows: list[NormalizedRow]) -> list[NormalizedRow]:
+    if not rows:
+        return rows
+    first = rows[0]
+    accounts = client.table("accounts").select("id").eq("provider", first.provider).eq("account_name", first.account_name).limit(1).execute().data or []
+    if not accounts:
+        return rows
+    positions = client.table("positions_current").select("*, instruments(symbol,name,isin,asset_type)").eq("account_id", accounts[0]["id"]).execute().data or []
+    dates = [str(item.get("valuation_date") or "") for item in positions if item.get("valuation_date")]
+    if not dates:
+        return rows
+    latest_date = max(dates)
+    return merge_partial_snapshot_rows(rows, [item for item in positions if str(item.get("valuation_date") or "") == latest_date])
+
+
 def _safe_draft_filename(name: str, fallback: str) -> str:
     raw_name = Path(name or fallback).name or fallback
     safe = "".join(char if char.isalnum() or char in {".", "-", "_"} else "_" for char in raw_name)
@@ -2607,6 +2649,9 @@ def import_manual_positions_via_dashboard(
     source = MANUAL_POSITION_SOURCES[source_label]
     file_name = ", ".join(file_names or []) or f"{source_label}-{date.today().isoformat()}"
     client = get_supabase(use_service_role=True, settings=settings)
+    # Bank-app screenshots are usually partial lists, not a complete account statement.
+    # Carry forward unseen holdings so a new screenshot cannot hide existing funds.
+    rows = merge_manual_rows_with_latest_snapshot(client, rows)
     import_id = create_import_record(
         client,
         source=source["source"],
