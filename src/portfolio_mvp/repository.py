@@ -9,11 +9,19 @@ from typing import Any
 from supabase import Client
 
 from portfolio_mvp.fx import FxRate, convert_to_usd, latest_rate_from_rows
+from portfolio_mvp.fund_nav import FundNav
+from portfolio_mvp.market_quotes import MarketQuote
 from portfolio_mvp.models import NormalizedRow, normalize_asset_type
 
 
 POSITION_METRIC_COLUMNS = "cost_original,unrealized_pnl_original,income_original,total_pnl_original,pnl_pct"
+POSITION_FUND_COLUMNS = "quantity_source,estimate_note"
 _POSITION_METRICS_SUPPORTED: bool | None = None
+_POSITION_FUND_FIELDS_SUPPORTED: bool | None = None
+
+
+class MissingFundNavTable(RuntimeError):
+    pass
 
 
 def file_sha256(path: str | Path) -> str:
@@ -133,6 +141,80 @@ def load_fx_rows(client: Client) -> list[dict[str, Any]]:
     return client.table("fx_rates").select("*").order("rate_date", desc=True).execute().data or []
 
 
+def load_fund_nav_rows(client: Client) -> list[dict[str, Any]]:
+    return client.table("fund_navs").select("*").order("nav_date", desc=True).execute().data or []
+
+
+def upsert_fund_navs(client: Client, navs: list[FundNav]) -> int:
+    payloads = []
+    for nav in navs:
+        payloads.append(
+            {
+                "fund_code": nav.fund_code,
+                "fund_name": nav.fund_name,
+                "unit_nav": str(nav.unit_nav),
+                "accumulated_nav": str(nav.accumulated_nav) if nav.accumulated_nav is not None else None,
+                "nav_date": nav.nav_date.isoformat(),
+                "announced_at": nav.announced_at.isoformat() if nav.announced_at else None,
+                "source": nav.source,
+                "status": nav.status,
+                "error_message": nav.error_message,
+            }
+        )
+    if payloads:
+        try:
+            client.table("fund_navs").upsert(
+                payloads,
+                on_conflict="fund_code,nav_date,source",
+            ).execute()
+        except Exception as exc:
+            if _is_missing_fund_nav_table_error(exc):
+                raise MissingFundNavTable(
+                    "Supabase 里还没有 fund_navs 表。请先在 Supabase SQL Editor 执行 "
+                    "sql/20260513_fund_navs.sql，然后刷新页面再试。"
+                ) from exc
+            raise
+    return len(payloads)
+
+
+def update_position_market_quotes(client: Client, quotes: dict[str, MarketQuote]) -> int:
+    if not quotes:
+        return 0
+    updated = 0
+    for symbol, quote in quotes.items():
+        positions = (
+            client.table("positions_current")
+            .select("id,quantity,instruments(symbol)")
+            .eq("currency", quote.currency)
+            .execute()
+            .data
+            or []
+        )
+        for position in positions:
+            instrument = position.get("instruments") or {}
+            if str(instrument.get("symbol") or "").upper() != symbol:
+                continue
+            quantity = Decimal(str(position.get("quantity") or "0"))
+            market_value = (quantity * quote.price).quantize(Decimal("0.01"))
+            client.table("positions_current").update(
+                {
+                    "price_original": str(quote.price),
+                    "market_value_original": str(market_value),
+                    "market_value_usd": str(market_value) if quote.currency == "USD" else None,
+                    "fx_rate_to_usd": "1" if quote.currency == "USD" else None,
+                    "fx_rate_source": quote.source,
+                    "fx_rate_date": quote.as_of.date().isoformat(),
+                }
+            ).eq("id", position["id"]).execute()
+            updated += 1
+    return updated
+
+
+def _is_missing_fund_nav_table_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "PGRST205" in text or "fund_navs" in text and "schema cache" in text
+
+
 def rate_for_currency(currency: str, fx_rows: list[dict[str, Any]]) -> FxRate | None:
     return latest_rate_from_rows(currency, fx_rows)
 
@@ -140,6 +222,7 @@ def rate_for_currency(currency: str, fx_rows: list[dict[str, Any]]) -> FxRate | 
 def import_normalized_rows(client: Client, rows: list[NormalizedRow], import_id: str) -> int:
     fx_rows = load_fx_rows(client)
     supports_position_metrics = position_metrics_supported(client)
+    supports_position_fund_fields = position_fund_fields_supported(client)
     account_cache: dict[tuple[str, str], str] = {}
     _clear_existing_snapshot_positions(client, rows, account_cache)
     count = 0
@@ -183,6 +266,8 @@ def import_normalized_rows(client: Client, rows: list[NormalizedRow], import_id:
                 }
                 if supports_position_metrics:
                     position_payload.update(_position_metric_payload(row))
+                if supports_position_fund_fields:
+                    position_payload.update(_position_fund_payload(row))
                 client.table("positions_current").upsert(
                     position_payload,
                     on_conflict="account_id,instrument_id,valuation_date",
@@ -281,6 +366,18 @@ def position_metrics_supported(client: Client) -> bool:
     return _POSITION_METRICS_SUPPORTED
 
 
+def position_fund_fields_supported(client: Client) -> bool:
+    global _POSITION_FUND_FIELDS_SUPPORTED
+    if _POSITION_FUND_FIELDS_SUPPORTED is not None:
+        return _POSITION_FUND_FIELDS_SUPPORTED
+    try:
+        client.table("positions_current").select(POSITION_FUND_COLUMNS).limit(1).execute()
+        _POSITION_FUND_FIELDS_SUPPORTED = True
+    except Exception:
+        _POSITION_FUND_FIELDS_SUPPORTED = False
+    return _POSITION_FUND_FIELDS_SUPPORTED
+
+
 def _position_metric_payload(row: NormalizedRow) -> dict[str, str | None]:
     payload = {
         "cost_original": str(row.cost) if row.cost is not None else None,
@@ -292,6 +389,13 @@ def _position_metric_payload(row: NormalizedRow) -> dict[str, str | None]:
     if row.total_pnl is not None and row.cost not in (None, Decimal("0")):
         payload["pnl_pct"] = str((row.total_pnl / row.cost).quantize(Decimal("0.000001")))
     return payload
+
+
+def _position_fund_payload(row: NormalizedRow) -> dict[str, str]:
+    return {
+        "quantity_source": row.quantity_source or "reported",
+        "estimate_note": row.estimate_note or "",
+    }
 
 
 def _clear_existing_snapshot_positions(

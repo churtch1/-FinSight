@@ -31,6 +31,7 @@ where = ["src"]
 norecursedirs = [
   ".git",
   ".pytest_cache",
+  ".codex_demo_publish",
   "pytest-cache-files-*",
 ]
 

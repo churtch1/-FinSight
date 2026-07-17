@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -69,6 +71,48 @@ def test_aggregate_spotlight_positions_sums_value_cost_and_pnl() -> None:
     assert round(float(row["pnl_pct"]), 4) == 0.25
 
 
+def test_apply_fund_nav_estimates_updates_fund_value_and_pnl() -> None:
+    dashboard = load_dashboard_module()
+    positions = pd.DataFrame(
+        [
+            {
+                "asset_type": "fund",
+                "symbol": "270023",
+                "quantity": 1000,
+                "price_original": 2.0,
+                "market_value_original": 2000.0,
+                "market_value_usd": 276.0,
+                "currency": "CNY",
+                "cost_original": 1800.0,
+                "total_pnl_original": 200.0,
+                "unrealized_pnl_original": 200.0,
+                "estimate_note": "",
+            }
+        ]
+    )
+    navs = pd.DataFrame(
+        [
+            {
+                "fund_code": "270023",
+                "fund_name": "GF Global Select",
+                "unit_nav": "2.3456",
+                "nav_date": "2026-05-11",
+                "source": "manual",
+                "status": "ok",
+            }
+        ]
+    )
+    rate_map = {"CNY": dashboard.FxRate("CNY", "USD", Decimal("0.14"), date(2026, 5, 11), "manual")}
+
+    updated = dashboard.apply_fund_nav_estimates(positions, navs, rate_map)
+
+    assert updated.loc[0, "price_original"] == 2.3456
+    assert updated.loc[0, "market_value_original"] == 2345.6
+    assert round(float(updated.loc[0, "market_value_usd"]), 2) == 328.38
+    assert round(float(updated.loc[0, "total_pnl_original"]), 2) == 545.60
+    assert updated.loc[0, "fund_nav_date"] == "2026-05-11"
+
+
 def test_has_valid_auth_query_accepts_signed_unexpired_token(monkeypatch) -> None:
     dashboard = load_dashboard_module()
     settings = SimpleNamespace(streamlit_password="secret")
@@ -106,3 +150,17 @@ def test_build_query_preserves_auth_params(monkeypatch) -> None:
     assert parsed["currency"] == ["CNY"]
     assert parsed[dashboard.AUTH_QUERY_TOKEN] == ["signed-token"]
     assert parsed[dashboard.AUTH_QUERY_EXPIRES] == ["4102444800"]
+
+
+def test_us_stock_symbols_only_include_ibkr_us_listed_positions() -> None:
+    dashboard = load_dashboard_module()
+    positions = pd.DataFrame(
+        [
+            {"provider": "IBKR", "asset_type": "stock", "currency": "USD", "symbol": "AAPL"},
+            {"provider": "IBKR", "asset_type": "fund", "currency": "USD", "symbol": "QQQ"},
+            {"provider": "HSBC China", "asset_type": "fund", "currency": "USD", "symbol": "IPFD2240"},
+            {"provider": "CMB", "asset_type": "wealth", "currency": "USD", "symbol": "USD123"},
+        ]
+    )
+
+    assert dashboard.us_stock_symbols_from_positions(positions) == ["AAPL", "QQQ"]

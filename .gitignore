@@ -14,6 +14,7 @@ env/
 
 # Private source documents and local scratch files
 HSBC/
+manual_import_drafts/
 py
 
 # Tool caches
