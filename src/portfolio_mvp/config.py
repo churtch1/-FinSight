@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 try:
     from dotenv import load_dotenv
@@ -10,19 +11,46 @@ except ImportError:
         return False
 
 
-load_dotenv()
+ROOT = Path(__file__).resolve().parents[2]
+ENV_PATH = ROOT / ".env"
+
+
+def load_project_env(*, override: bool = False) -> None:
+    load_dotenv(ENV_PATH, override=override)
+
+
+load_project_env()
+
+
+def _env(name: str, default: str = "") -> str:
+    return os.getenv(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.getenv(name, str(default)))
 
 
 @dataclass(frozen=True)
 class Settings:
-    supabase_url: str = os.getenv("SUPABASE_URL", "")
-    supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "")
-    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    streamlit_password: str = os.getenv("STREAMLIT_PASSWORD", "")
-    fx_api_url: str = os.getenv("FX_API_URL", "https://open.er-api.com/v6/latest/USD")
-    ibkr_host: str = os.getenv("IBKR_HOST", "127.0.0.1")
-    ibkr_port: int = int(os.getenv("IBKR_PORT", "7497"))
-    ibkr_client_id: int = int(os.getenv("IBKR_CLIENT_ID", "11"))
+    supabase_url: str = field(default_factory=lambda: _env("SUPABASE_URL"))
+    supabase_anon_key: str = field(default_factory=lambda: _env("SUPABASE_ANON_KEY"))
+    supabase_service_role_key: str = field(default_factory=lambda: _env("SUPABASE_SERVICE_ROLE_KEY"))
+    streamlit_password: str = field(default_factory=lambda: _env("STREAMLIT_PASSWORD"))
+    fx_api_url: str = field(default_factory=lambda: _env("FX_API_URL", "https://open.er-api.com/v6/latest/USD"))
+    fund_nav_api_url: str = field(
+        default_factory=lambda: _env("FUND_NAV_API_URL", "https://fundgz.1234567.com.cn/js/{fund_code}.js")
+    )
+    dashscope_api_key: str = field(default_factory=lambda: _env("DASHSCOPE_API_KEY"))
+    dashscope_ocr_model: str = field(default_factory=lambda: _env("DASHSCOPE_OCR_MODEL", "qwen-vl-ocr-latest"))
+    dashscope_compatible_api_url: str = field(
+        default_factory=lambda: _env(
+            "DASHSCOPE_COMPATIBLE_API_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+    )
+    ibkr_host: str = field(default_factory=lambda: _env("IBKR_HOST", "127.0.0.1"))
+    ibkr_port: int = field(default_factory=lambda: _env_int("IBKR_PORT", 7497))
+    ibkr_client_id: int = field(default_factory=lambda: _env_int("IBKR_CLIENT_ID", 11))
 
     @property
     def has_supabase_read_config(self) -> bool:
@@ -34,4 +62,5 @@ class Settings:
 
 
 def get_settings() -> Settings:
+    load_project_env(override=True)
     return Settings()

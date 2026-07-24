@@ -63,6 +63,8 @@ class NormalizedRow:
     unrealized_pnl: Decimal | None = None
     income: Decimal | None = None
     total_pnl: Decimal | None = None
+    quantity_source: str = "reported"
+    estimate_note: str = ""
 
 
 def normalize_asset_type(value: str | None) -> str:
