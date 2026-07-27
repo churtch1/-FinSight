@@ -41,7 +41,8 @@ class Settings:
         default_factory=lambda: _env("FUND_NAV_API_URL", "https://fundgz.1234567.com.cn/js/{fund_code}.js")
     )
     dashscope_api_key: str = field(default_factory=lambda: _env("DASHSCOPE_API_KEY"))
-    dashscope_ocr_model: str = field(default_factory=lambda: _env("DASHSCOPE_OCR_MODEL", "qwen-vl-ocr-latest"))
+    dashscope_ocr_model: str = field(default_factory=lambda: _env("DASHSCOPE_OCR_MODEL", "qwen3.7-plus"))
+    dashscope_portfolio_model: str = field(default_factory=lambda: _env("DASHSCOPE_PORTFOLIO_MODEL", "qwen3.7-plus"))
     dashscope_compatible_api_url: str = field(
         default_factory=lambda: _env(
             "DASHSCOPE_COMPATIBLE_API_URL",
@@ -59,6 +60,7 @@ class Settings:
     @property
     def has_supabase_write_config(self) -> bool:
         return bool(self.supabase_url and self.supabase_service_role_key)
+
 
 
 def get_settings() -> Settings:

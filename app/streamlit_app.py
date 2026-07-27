@@ -6,7 +6,7 @@ import json
 import shutil
 import sys
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +40,7 @@ from portfolio_mvp.integrations.ibkr import sync_ibkr_data
 from portfolio_mvp.market_quotes import MarketQuote, YahooMarketQuoteProvider, normalize_us_symbol
 from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
 from portfolio_mvp.parsers.manual_positions import parse_manual_position_records
+from portfolio_mvp.parsers.position_screenshot import recognize_position_screenshot_with_source
 from portfolio_mvp.models import NormalizedRow
 from portfolio_mvp.repository import (
     complete_import,
@@ -2465,7 +2466,43 @@ def merge_manual_rows_with_latest_snapshot(client: object, rows: list[Normalized
     if not dates:
         return rows
     latest_date = max(dates)
-    return merge_partial_snapshot_rows(rows, [item for item in positions if str(item.get("valuation_date") or "") == latest_date])
+    latest_positions = [item for item in positions if str(item.get("valuation_date") or "") == latest_date]
+    return merge_partial_snapshot_rows(_reconcile_unambiguous_gold_rows(rows, latest_positions), latest_positions)
+
+
+def _reconcile_unambiguous_gold_rows(rows: list[NormalizedRow], previous_positions: list[dict[str, Any]]) -> list[NormalizedRow]:
+    """Update an existing bank gold account instead of creating a near-duplicate instrument.
+
+    A CMB gold screenshot often has a shortened display name and no product code.
+    When the account has exactly one existing gold holding in the same currency,
+    that visible row is an update to the known holding rather than a new product.
+    """
+    reconciled: list[NormalizedRow] = []
+    for row in rows:
+        if row.asset_type != "gold":
+            reconciled.append(row)
+            continue
+        matches = []
+        for position in previous_positions:
+            instrument = position.get("instruments") or {}
+            if str(instrument.get("asset_type") or "") != "gold":
+                continue
+            if str(position.get("currency") or "").upper() != row.currency.upper():
+                continue
+            matches.append((position, instrument))
+        if len(matches) != 1:
+            reconciled.append(row)
+            continue
+        _, instrument = matches[0]
+        reconciled.append(
+            replace(
+                row,
+                instrument_code=str(instrument.get("symbol") or row.instrument_code),
+                instrument_name=str(instrument.get("name") or row.instrument_name),
+                isin=str(instrument.get("isin") or row.isin),
+            )
+        )
+    return reconciled
 
 
 def _safe_draft_filename(name: str, fallback: str) -> str:
@@ -2668,6 +2705,109 @@ def import_manual_positions_via_dashboard(
         complete_import(client, import_id, imported, "needs_review", f"{failed} rows failed during import.")
     message = f"{source_label} 持仓导入完成：{imported}/{len(rows)} 条。"
     return f"{message} {nav_message}".strip()
+
+
+def _auto_source_label(detected: str, records: list[dict[str, str]]) -> str:
+    normalized = detected.strip().lower()
+    if "支付宝" in detected or "alipay" in normalized:
+        return "支付宝"
+    if "招商" in detected or "cmb" in normalized:
+        if records and all(str(item.get("asset_type") or "") == "gold" for item in records):
+            return "招商银行黄金"
+        return "招商银行"
+    raise ValueError("无法从材料中可靠判断来源；请上传包含招商银行或支付宝页面标识的完整截图。")
+
+
+def prepare_smart_uploads(uploaded_files: list[object], settings: Settings) -> tuple[list[dict[str, Any]], pd.DataFrame]:
+    """Recognize uploads without changing the portfolio database."""
+    previews: list[pd.DataFrame] = []
+    plan: list[dict[str, Any]] = []
+    grouped_records: dict[str, list[dict[str, str]]] = {}
+    grouped_names: dict[str, list[str]] = {}
+
+    for uploaded in uploaded_files:
+        suffix = Path(uploaded.name).suffix.lower()
+        content = uploaded.getvalue()
+        if suffix == ".pdf":
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as handle:
+                handle.write(content)
+                temp_path = Path(handle.name)
+            try:
+                rows = parse_hsbc_cn_pdf(temp_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+            if not rows:
+                raise ValueError(f"{uploaded.name} 未识别到可导入的汇丰持仓。")
+            previews.append(preview_rows_frame(rows))
+            plan.append({"source_label": "HSBC China", "rows": rows, "file_names": [uploaded.name]})
+            continue
+
+        detected, records = recognize_position_screenshot_with_source(
+            content, mime_type=uploaded.type or "image/png", source_label="unknown", settings=settings
+        )
+        source_label = _auto_source_label(detected, records)
+        if not records:
+            raise ValueError(f"{uploaded.name} 未识别到单项持仓。")
+        grouped_records.setdefault(source_label, []).extend(records)
+        grouped_names.setdefault(source_label, []).append(uploaded.name)
+
+    for source_label, records in grouped_records.items():
+        rows = build_manual_position_rows(source_label, records, settings)
+        previews.append(preview_rows_frame(rows))
+        plan.append({"source_label": source_label, "rows": rows, "file_names": grouped_names[source_label]})
+    return plan, pd.concat(previews, ignore_index=True) if previews else pd.DataFrame()
+
+
+def import_prepared_smart_uploads(plan: list[dict[str, Any]], settings: Settings) -> str:
+    messages: list[str] = []
+    for item in plan:
+        source_label = str(item["source_label"])
+        rows = item["rows"]
+        file_names = item["file_names"]
+        if source_label != "HSBC China":
+            messages.append(import_manual_positions_via_dashboard(source_label, rows, settings, file_names))
+            continue
+        client = get_supabase(use_service_role=True, settings=settings)
+        file_name = ", ".join(file_names)
+        import_id = create_import_record(client, source="hsbc_china", source_type="pdf", file_name=file_name, file_hash=manual_position_import_hash("hsbc_china", rows))
+        imported = import_normalized_rows(client, rows, import_id)
+        complete_import(client, import_id, imported, "completed")
+        messages.append(f"汇丰 PDF 持仓导入完成：{imported} 条")
+    return "；".join(messages)
+
+
+def render_smart_portfolio_upload(settings: Settings) -> None:
+    st.markdown("#### 智能持仓同步")
+    st.caption("上传汇丰资产配置报告或招商银行、支付宝持仓截图。系统自动识别来源、产品和币种，并将完整快照或局部更新安全同步到数据库。")
+    uploads = st.file_uploader(
+        "上传 PDF 或持仓截图",
+        type=["pdf", "png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="smart_portfolio_uploader",
+    )
+    if st.button("识别上传材料", type="primary", icon=":material/auto_fix_high:", use_container_width=True, disabled=not uploads):
+        try:
+            with st.spinner("正在识别材料..."):
+                plan, preview = prepare_smart_uploads(list(uploads), settings)
+            st.session_state["smart_upload_plan"] = plan
+            st.session_state[HSBC_PREVIEW_KEY] = preview
+            st.session_state[HSBC_PREVIEW_NAME_KEY] = "智能同步结果"
+            st.success(f"已识别 {len(preview)} 条持仓。请核对下方结果后确认导入。")
+        except Exception as exc:
+            st.error(str(exc))
+    render_hsbc_preview()
+    plan = st.session_state.get("smart_upload_plan")
+    if plan:
+        if st.button("确认导入识别结果", type="primary", icon=":material/check_circle:", use_container_width=True):
+            try:
+                with st.spinner("正在写入持仓..."):
+                    message = import_prepared_smart_uploads(plan, settings)
+                st.session_state.pop("smart_upload_plan", None)
+                load_data.clear()
+                push_flash("success", message)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
 
 
 def render_manual_positions_import(settings: Settings) -> None:
@@ -3136,6 +3276,10 @@ def render_operations_panel(imports: pd.DataFrame, errors: pd.DataFrame, positio
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
+
+    render_smart_portfolio_upload(settings)
+    render_import_status(imports, errors)
+    return
 
     with right:
         st.markdown(
