@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+from io import BytesIO
 from typing import Any
 
 import requests
+from PIL import Image
 
 from portfolio_mvp.config import Settings, get_settings
 
@@ -55,6 +57,19 @@ def recognize_position_screenshot_records(
     source_label: str,
     settings: Settings | None = None,
 ) -> list[dict[str, str]]:
+    _, records = recognize_position_screenshot_with_source(
+        image_bytes, mime_type=mime_type, source_label=source_label, settings=settings
+    )
+    return records
+
+
+def recognize_position_screenshot_with_source(
+    image_bytes: bytes,
+    *,
+    mime_type: str,
+    source_label: str = "unknown",
+    settings: Settings | None = None,
+) -> tuple[str, list[dict[str, str]]]:
     settings = settings or get_settings()
     api_key = getattr(settings, "dashscope_api_key", "") or os.getenv("DASHSCOPE_API_KEY", "")
     api_url = getattr(settings, "dashscope_compatible_api_url", "") or os.getenv(
@@ -75,7 +90,14 @@ def recognize_position_screenshot_records(
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json=_build_request_payload(image_bytes, mime_type, source_label, model),
+        json=_build_request_payload(
+            image_bytes,
+            mime_type,
+            source_label,
+            model,
+            use_ocr_pixel_limits="ocr" in model.casefold(),
+            high_resolution="ocr" not in model.casefold(),
+        ),
         timeout=90,
     )
     if response.status_code >= 400:
@@ -88,35 +110,79 @@ def recognize_position_screenshot_records(
     except json.JSONDecodeError as exc:
         raise ValueError("Screenshot recognition result is not valid JSON.") from exc
 
+    review_model = getattr(settings, "dashscope_portfolio_model", "")
+    if review_model and review_model != model:
+        review_response = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=_build_request_payload(
+                image_bytes,
+                mime_type,
+                source_label,
+                review_model,
+                prompt=_portfolio_review_prompt(parsed),
+                use_ocr_pixel_limits=False,
+                high_resolution=True,
+            ),
+            timeout=90,
+        )
+        if review_response.status_code < 400:
+            try:
+                parsed = json.loads(_strip_json_markdown(_extract_chat_completion_text(review_response.json())))
+            except json.JSONDecodeError:
+                # Keep a usable OCR result when a reviewer response is malformed.
+                pass
+
     positions = parsed.get("positions")
     if not isinstance(positions, list):
         raise ValueError("Screenshot recognition result is missing positions.")
-    return [_normalize_record(item) for item in positions if isinstance(item, dict)]
+    records = [_normalize_record(item) for item in positions if isinstance(item, dict)]
+    detected_source = (
+        _textual_source_override(records)
+        or _visual_source_override(image_bytes)
+        or str(parsed.get("source") or source_label or "unknown").strip()
+    )
+    return detected_source, records
 
 
-def _build_request_payload(image_bytes: bytes, mime_type: str, source_label: str, model: str) -> dict[str, Any]:
+def _build_request_payload(
+    image_bytes: bytes,
+    mime_type: str,
+    source_label: str,
+    model: str,
+    prompt: str | None = None,
+    use_ocr_pixel_limits: bool = True,
+    high_resolution: bool = False,
+) -> dict[str, Any]:
     image_data = base64.b64encode(image_bytes).decode("ascii")
-    return {
+    image_content: dict[str, Any] = {
+        "type": "image_url",
+        "image_url": {"url": f"data:{mime_type};base64,{image_data}"},
+    }
+    if use_ocr_pixel_limits:
+        image_content.update({"min_pixels": 3072, "max_pixels": 8388608})
+    payload: dict[str, Any] = {
         "model": model,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{image_data}"},
-                        "min_pixels": 3072,
-                        "max_pixels": 8388608,
-                    },
+                    image_content,
                     {
                         "type": "text",
-                        "text": _recognition_prompt(source_label),
+                        "text": prompt or _recognition_prompt(source_label),
                     },
                 ],
             }
         ],
         "max_tokens": 4096,
     }
+    if high_resolution:
+        payload["vl_high_resolution_images"] = True
+    return payload
 
 
 def _recognition_prompt(source_label: str) -> str:
@@ -125,8 +191,10 @@ def _recognition_prompt(source_label: str) -> str:
         f"You are extracting portfolio holdings from a {source_label} asset screenshot.\n"
         "Only extract individual holdings that are clearly visible in the screenshot. Do not invent data.\n\n"
         "Return JSON only, with this exact top-level shape:\n"
-        f'{{"positions":[{{"{POSITION_SCREENSHOT_COLUMNS[0]}":"","instrument_name":"","asset_type":"","quantity":"","price":"","fund_nav":"","fund_nav_date":"","amount":"","currency":"","cost":"","unrealized_pnl":"","total_pnl":"","pnl_pct":"","description":""}}]}}\n\n'
+        f'{{"source":"招商银行|支付宝|unknown","positions":[{{"{POSITION_SCREENSHOT_COLUMNS[0]}":"","instrument_name":"","asset_type":"","quantity":"","price":"","fund_nav":"","fund_nav_date":"","amount":"","currency":"","cost":"","unrealized_pnl":"","total_pnl":"","pnl_pct":"","description":""}}]}}\n\n'
         f"Required fields for every position: {columns}.\n"
+        "Set source to 招商银行 or 支付宝 only when the app branding or account context is clearly visible; otherwise use unknown.\n"
+        "Source rules: 招商银行, 招行, CMB, China Merchants Bank, or the red CMB logo means source=招商银行. 支付宝, 蚂蚁财富, Ant Group, or Alipay logo means source=支付宝. Never infer 支付宝 merely because a page shows funds; when source evidence is absent use unknown.\n"
         "Field notes:\n"
         "- asset_type must be one of: stock, fund, wealth_product, bond, cash, gold, crypto, other.\n"
         "- amount is the current market value or holding amount in the holding's own currency.\n"
@@ -168,6 +236,57 @@ def _recognition_prompt(source_label: str) -> str:
         'If the screenshot only shows total assets and no individual holdings, return {"positions":[]}.\n'
         "Numbers should not include currency symbols. Commas and minus signs are allowed."
     )
+
+
+def _portfolio_review_prompt(ocr_draft: dict[str, Any]) -> str:
+    return (
+        "You are the final reviewer for a Chinese personal portfolio screenshot. Inspect the ORIGINAL image, "
+        "then correct the OCR draft below. Return JSON only in the exact schema required below.\n\n"
+        + _recognition_prompt("unknown")
+        + "\n\nOCR draft (it can be wrong or incomplete):\n"
+        + json.dumps(ocr_draft, ensure_ascii=False)
+        + "\n\nFinal-review priorities:\n"
+        "- Source must be decided from visible app/bank branding, never from a guessed product type.\n"
+        "- For each visible fund row, recover total_pnl and pnl_pct from the holding-return column when present.\n"
+        "- Treat 当日收益, 昨日收益, 日收益, and daily P/L as separate daily figures; never write them into unrealized_pnl, total_pnl, cost, or pnl_pct.\n"
+        "- If cumulative holding P/L is shown, set both unrealized_pnl and total_pnl to it.\n"
+        "- Do not invent a P/L or percentage that is not visible."
+    )
+
+
+def _visual_source_override(image_bytes: bytes) -> str:
+    """Apply the user's stable UI convention before accepting an LLM source guess.
+
+    The user's Alipay holding captures use a large blue page background, while
+    China Merchants Bank captures are predominantly white.  This signal is more
+    dependable than inferring the provider from fund names or values.
+    """
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            pixels = image.convert("RGB").resize((80, 80)).getdata()
+    except Exception:
+        return ""
+
+    total = len(pixels)
+    if not total:
+        return ""
+    blue = sum(1 for red, green, blue_value in pixels if blue_value >= 130 and blue_value > red * 1.18 and blue_value > green * 1.05)
+    white = sum(1 for red, green, blue_value in pixels if min(red, green, blue_value) >= 238 and max(red, green, blue_value) - min(red, green, blue_value) <= 18)
+    if blue / total >= 0.12:
+        return "支付宝"
+    if white / total >= 0.58:
+        return "招商银行"
+    return ""
+
+
+def _textual_source_override(records: list[dict[str, str]]) -> str:
+    """Provider names visible in the screenshot outrank a model classification."""
+    text = " ".join(" ".join(str(value) for value in record.values()) for record in records).casefold()
+    if any(marker in text for marker in ("招商银行", "招行", "cmb", "china merchants bank")):
+        return "招商银行"
+    if any(marker in text for marker in ("支付宝", "蚂蚁财富", "alipay", "ant group")):
+        return "支付宝"
+    return ""
 
 
 def _extract_chat_completion_text(payload: dict[str, Any]) -> str:

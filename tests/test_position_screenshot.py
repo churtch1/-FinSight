@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
+
+from PIL import Image
 
 import pytest
 
@@ -8,6 +11,8 @@ from portfolio_mvp.config import Settings
 from portfolio_mvp.parsers.position_screenshot import (
     MissingScreenshotRecognitionConfig,
     _recognition_prompt,
+    _textual_source_override,
+    _visual_source_override,
     _normalize_record,
     recognize_position_screenshot_records,
 )
@@ -60,7 +65,7 @@ def test_recognize_position_screenshot_records_calls_bailian_and_normalizes(monk
         return FakeResponse()
 
     monkeypatch.setattr("portfolio_mvp.parsers.position_screenshot.requests.post", fake_post)
-    settings = Settings(dashscope_api_key="test-key", dashscope_ocr_model="test-model")
+    settings = Settings(dashscope_api_key="test-key", dashscope_ocr_model="test-model", dashscope_portfolio_model="")
 
     rows = recognize_position_screenshot_records(
         b"fake-image",
@@ -137,3 +142,18 @@ def test_recognition_prompt_covers_alipay_combined_amount_yesterday_return_colum
     assert "total_pnl=14960.77" in prompt
     assert "pnl_pct=74.80%" in prompt
     assert "ignore +409.74" in prompt
+
+
+def test_visual_source_override_uses_blue_alipay_and_white_cmb_convention() -> None:
+    def image_bytes(color: str) -> bytes:
+        image = Image.new("RGB", (100, 100), color=color)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    assert _visual_source_override(image_bytes("#1976D2")) == "支付宝"
+    assert _visual_source_override(image_bytes("#FFFFFF")) == "招商银行"
+
+
+def test_textual_source_override_prioritizes_visible_cmb_branding() -> None:
+    assert _textual_source_override([{"instrument_name": "招行黄金账户", "description": ""}]) == "招商银行"
