@@ -35,7 +35,7 @@ if str(SRC) not in sys.path:
 from portfolio_mvp.config import Settings, get_settings
 from portfolio_mvp.db import MissingSupabaseConfig, fetch_dashboard_data, get_supabase
 from portfolio_mvp.fx import FxRate, convert_to_usd, fetch_online_usd_rates, latest_rate_from_rows
-from portfolio_mvp.fund_nav import EastmoneyFundNavProvider, FundNav, latest_nav_map, normalize_fund_code
+from portfolio_mvp.fund_nav import AutomaticFundNavProvider, FundNav, latest_nav_map, normalize_fund_code
 from portfolio_mvp.integrations.ibkr import sync_ibkr_data
 from portfolio_mvp.market_quotes import MarketQuote, YahooMarketQuoteProvider, normalize_us_symbol
 from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
@@ -2410,7 +2410,7 @@ def fund_codes_from_manual_position_records(records: list[dict[str, str]]) -> li
 def fetch_fund_navs_for_codes(codes: list[str], settings: Settings) -> dict[str, FundNav]:
     if not codes:
         return {}
-    provider = EastmoneyFundNavProvider(settings=settings)
+    provider = AutomaticFundNavProvider(settings=settings)
     return provider.fetch_many(codes)
 
 
@@ -2965,7 +2965,7 @@ def refresh_fund_navs_via_dashboard(positions: pd.DataFrame, settings: Settings)
     codes = fund_codes_from_positions(positions)
     if not codes:
         return "没有找到可刷新净值的基金代码。"
-    provider = EastmoneyFundNavProvider(settings=settings)
+    provider = AutomaticFundNavProvider(settings=settings)
     navs = list(provider.fetch_many(codes).values())
     client = get_supabase(use_service_role=True, settings=settings)
     loaded = upsert_fund_navs(client, navs)
@@ -3018,12 +3018,10 @@ def update_fund_positions_from_dashboard(client: Any, navs: list[FundNav]) -> in
     positions = (
         client.table("positions_current")
         .select("id,quantity,currency,cost_original,market_value_original,quantity_source,instruments(symbol,asset_type)")
-        .eq("currency", "CNY")
         .execute()
         .data
         or []
     )
-    cny_rate = latest_rate_from_rows("CNY", fx_rows)
     for position in positions:
         instrument = position.get("instruments") or {}
         if str(instrument.get("asset_type") or "") != "fund":
@@ -3041,13 +3039,15 @@ def update_fund_positions_from_dashboard(client: Any, navs: list[FundNav]) -> in
         if existing_value > 0 and (quantity == 1 or quantity_source == "manual"):
             quantity = (existing_value / nav.unit_nav).quantize(Decimal("0.000001"))
             inferred_quantity = True
+        currency = str(position.get("currency") or "").upper()
         market_value = (quantity * nav.unit_nav).quantize(Decimal("0.01"))
+        fx_rate = latest_rate_from_rows(currency, fx_rows)
         payload: dict[str, Any] = {
             "quantity": str(quantity),
             "price_original": str(nav.unit_nav),
             "market_value_original": str(market_value),
-            "market_value_usd": str(convert_to_usd(market_value, "CNY", cny_rate)) if cny_rate else None,
-            "fx_rate_to_usd": str(cny_rate.rate) if cny_rate else None,
+            "market_value_usd": str(convert_to_usd(market_value, currency, fx_rate)) if fx_rate else None,
+            "fx_rate_to_usd": str(fx_rate.rate) if fx_rate else None,
             "fx_rate_source": f"fund_nav:{nav.source}",
             "fx_rate_date": nav.nav_date.isoformat(),
         }

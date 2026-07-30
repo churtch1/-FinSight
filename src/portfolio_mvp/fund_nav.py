@@ -9,6 +9,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from html import unescape
 
 import requests
 
@@ -76,10 +77,146 @@ class EastmoneyFundNavProvider(FundNavProvider):
             return parse_eastmoney_pingzhongdata_response(normalized, fallback.text)
 
 
+@dataclass(frozen=True)
+class OffshoreFund:
+    fund_code: str
+    fund_name: str
+    isin: str
+    currency: str
+    urls: tuple[str, ...]
+
+
+OFFSHORE_FUNDS: dict[str, OffshoreFund] = {
+    "IPFD2240": OffshoreFund(
+        fund_code="IPFD2240",
+        fund_name="联博美国增长基金 A类美元累积",
+        isin="LU0079474960",
+        currency="USD",
+        urls=(
+            "https://www.boursorama.com/bourse/opcvm/cours/MP-306315/",
+            "https://www.kgi.com.hk/en/products-overview/wealth-products/mutual-funds/"
+            "fund-detail?funds=lu0079474960%3Ausd%3A0",
+            "https://www.finanzen.net/fonds/ab-i-american-growth-portfolio-a-lu0079474960",
+        ),
+    ),
+    "IPFD3391": OffshoreFund(
+        fund_code="IPFD3391",
+        fund_name="骏利亨德森全球科技领先基金 A2美元累积",
+        isin="LU0070992663",
+        currency="USD",
+        urls=(
+            "https://www.janushenderson.com/en-be/advisor/product/"
+            "janus-henderson-horizon-global-technology-leaders-fund/?identifier=LU0070992663",
+            "https://www.chiefgroup.com.hk/en/funds/fundsinfo/dp?secid=F0GBR04E8V",
+            "https://www.finanzen.net/fonds/"
+            "janus-henderson-horizon-global-technology-leaders-fund-lu0070992663",
+        ),
+    ),
+}
+
+
+class OffshoreFundNavProvider(FundNavProvider):
+    """Fetch daily disclosed NAVs for the exact HSBC offshore share classes."""
+
+    def __init__(self, timeout: int = 10) -> None:
+        self.timeout = timeout
+
+    def fetch_one(self, fund_code: str) -> FundNav:
+        normalized = normalize_fund_code(fund_code)
+        fund = OFFSHORE_FUNDS.get(normalized)
+        if fund is None:
+            raise ValueError(f"Unsupported offshore fund: {fund_code}")
+
+        errors: list[str] = []
+        for url in fund.urls:
+            try:
+                response = requests.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; PortfolioDashboard/1.0)"},
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                unit_nav, nav_date = parse_offshore_fund_page(response.text, fund.currency)
+                return FundNav(
+                    fund_code=fund.fund_code,
+                    fund_name=fund.fund_name,
+                    unit_nav=unit_nav,
+                    nav_date=nav_date,
+                    source=f"offshore:{response.url.split('/')[2]}:{fund.isin}",
+                    status="ok",
+                )
+            except Exception as exc:
+                errors.append(f"{url}: {exc}")
+        raise ValueError("; ".join(errors))
+
+
+class AutomaticFundNavProvider(FundNavProvider):
+    """Dispatch domestic fund codes and HSBC offshore product codes."""
+
+    def __init__(self, settings: Settings | None = None, timeout: int = 8) -> None:
+        self.domestic = EastmoneyFundNavProvider(settings=settings, timeout=timeout)
+        self.offshore = OffshoreFundNavProvider(timeout=max(timeout, 10))
+
+    def fetch_one(self, fund_code: str) -> FundNav:
+        normalized = normalize_fund_code(fund_code)
+        if normalized in OFFSHORE_FUNDS:
+            return self.offshore.fetch_one(normalized)
+        return self.domestic.fetch_one(normalized)
+
+
 def normalize_fund_code(value: str | None) -> str:
-    text = str(value or "").strip()
+    text = str(value or "").strip().upper()
+    offshore_match = re.search(r"\bIPFD\d{4}\b", text)
+    if offshore_match:
+        return offshore_match.group(0)
     match = re.search(r"\d{6}", text)
     return match.group(0) if match else ""
+
+
+def parse_offshore_fund_page(text: str, currency: str = "USD") -> tuple[Decimal, date]:
+    """Extract a formal daily NAV and its date from supported public fund pages."""
+    # Boursorama embeds the complete daily NAV series in the server-rendered page.
+    series = re.findall(r'"period":"(\d{2})\\?/(\d{2})","value":([0-9.]+)', text)
+    if series:
+        day, month, value = series[-1]
+        today = date.today()
+        year = today.year
+        candidate = date(year, int(month), int(day))
+        if candidate > today:
+            candidate = date(year - 1, int(month), int(day))
+        return _decimal(value), candidate
+
+    plain = unescape(re.sub(r"<[^>]+>", " ", text))
+    plain = re.sub(r"\s+", " ", plain)
+    currency_pattern = re.escape(currency.upper())
+    nav_patterns = (
+        rf"\bNAV\b[^0-9]{{0,80}}{currency_pattern}\s*([0-9][0-9,.]*)",
+        rf"\bNAV\b[^0-9]{{0,80}}([0-9][0-9,.]*)\s*{currency_pattern}",
+        rf"\b(?:Unit Price|Kurs)\b[^0-9]{{0,80}}([0-9][0-9,.]*)",
+    )
+    nav_match = next((re.search(pattern, plain, flags=re.I) for pattern in nav_patterns if re.search(pattern, plain, flags=re.I)), None)
+    if nav_match is None:
+        raise ValueError("Daily NAV is missing from offshore fund page")
+    unit_nav = _decimal(nav_match.group(1))
+    if unit_nav <= 0:
+        raise ValueError("Daily NAV must be positive")
+
+    date_patterns = (
+        r"(?:As of|NAV(?:/Kurs)?|NAV date|Kursdatum)[^0-9]{0,30}(\d{4}-\d{2}-\d{2})",
+        r"(?:As of|NAV(?:/Kurs)?|NAV date|Kursdatum)[^0-9]{0,30}(\d{2}/\d{2}/\d{4})",
+        r"(?:As of|NAV(?:/Kurs)?|NAV date|Kursdatum)[^0-9]{0,30}(\d{2}\.\d{2}\.\d{2,4})",
+    )
+    date_match = next((re.search(pattern, plain, flags=re.I) for pattern in date_patterns if re.search(pattern, plain, flags=re.I)), None)
+    if date_match is None:
+        raise ValueError("NAV date is missing from offshore fund page")
+    raw_date = date_match.group(1)
+    if "-" in raw_date:
+        nav_date = date.fromisoformat(raw_date)
+    elif "/" in raw_date:
+        nav_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+    else:
+        nav_date = datetime.strptime(raw_date, "%d.%m.%Y" if len(raw_date.split(".")[-1]) == 4 else "%d.%m.%y").date()
+    return unit_nav, nav_date
 
 
 def parse_eastmoney_nav_response(fund_code: str, text: str) -> FundNav:

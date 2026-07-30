@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from portfolio_mvp.db import get_supabase
-from portfolio_mvp.fund_nav import EastmoneyFundNavProvider, normalize_fund_code, parse_fund_nav_csv
+from portfolio_mvp.fund_nav import AutomaticFundNavProvider, normalize_fund_code, parse_fund_nav_csv
 from portfolio_mvp.repository import upsert_fund_navs
 
 
@@ -20,7 +20,7 @@ def main() -> None:
 
     fund_codes = sorted({normalize_fund_code(item) for item in args.fund_code if normalize_fund_code(item)})
     if fund_codes:
-        provider = EastmoneyFundNavProvider()
+        provider = AutomaticFundNavProvider()
         navs.extend(provider.fetch_many(fund_codes).values())
 
     client = get_supabase(use_service_role=True)

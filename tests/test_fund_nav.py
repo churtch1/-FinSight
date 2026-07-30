@@ -8,6 +8,8 @@ import pytest
 
 from portfolio_mvp.fund_nav import (
     latest_nav_map,
+    normalize_fund_code,
+    parse_offshore_fund_page,
     parse_eastmoney_nav_response,
     parse_eastmoney_pingzhongdata_response,
     parse_fund_nav_csv,
@@ -70,3 +72,37 @@ def test_parse_fund_nav_csv() -> None:
     assert len(navs) == 1
     assert navs[0].fund_code == "270023"
     assert navs[0].unit_nav == Decimal("2.3456")
+
+
+def test_normalize_fund_code_accepts_hsbc_offshore_code() -> None:
+    assert normalize_fund_code("OIP fund (ipfd3391)") == "IPFD3391"
+
+
+def test_parse_offshore_fund_page_reads_iso_daily_nav() -> None:
+    text = "<h1>Fund</h1><div>NAV USD 333.33</div><div>As of 2026-07-24</div>"
+
+    unit_nav, nav_date = parse_offshore_fund_page(text)
+
+    assert unit_nav == Decimal("333.33")
+    assert nav_date == date(2026, 7, 24)
+
+
+def test_parse_offshore_fund_page_reads_european_daily_nav_date() -> None:
+    text = "<div>NAV 254.12 USD</div><div>NAV date 22/07/2026</div>"
+
+    unit_nav, nav_date = parse_offshore_fund_page(text)
+
+    assert unit_nav == Decimal("254.12")
+    assert nav_date == date(2026, 7, 22)
+
+
+def test_parse_offshore_fund_page_reads_embedded_daily_series() -> None:
+    text = (
+        '<div data-chart=\'{"data":[{"period":"27\\/07","value":250.72},'
+        '{"period":"28\\/07","value":251.78}]}\'></div>'
+    )
+
+    unit_nav, nav_date = parse_offshore_fund_page(text)
+
+    assert unit_nav == Decimal("251.78")
+    assert (nav_date.month, nav_date.day) == (7, 28)
