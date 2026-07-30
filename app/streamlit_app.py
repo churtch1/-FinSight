@@ -33,7 +33,14 @@ if load_dashboard_dotenv is not None:
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from portfolio_mvp.config import Settings, get_settings
+import portfolio_mvp.config as config_module
+
+if not hasattr(config_module.Settings, "ibkr_flex_token"):
+    importlib.invalidate_caches()
+    config_module = importlib.reload(config_module)
+
+Settings = config_module.Settings
+get_settings = config_module.get_settings
 from portfolio_mvp.db import MissingSupabaseConfig, fetch_dashboard_data, get_supabase
 from portfolio_mvp.fx import FxRate, convert_to_usd, fetch_online_usd_rates, latest_rate_from_rows
 import portfolio_mvp.fund_nav as fund_nav_module
