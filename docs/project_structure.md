@@ -68,7 +68,6 @@ portfolio-mvp/
       performance.py
 
   scripts/
-    sync_ibkr.py
     import_pdf.py
     import_csv.py
     load_fx_rates.py
@@ -99,7 +98,7 @@ portfolio-mvp/
 
 负责接触外部数据源。
 
-- `ibkr.py`: 连接 IB Gateway / TWS API。
+- `ibkr_flex.py`: 连接 IBKR Flex Web Service。
 - `local_files.py`: 扫描或接收本地 PDF / CSV 文件。
 
 collector 不直接写数据库，只输出原始数据或标准化前的中间数据。

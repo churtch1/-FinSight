@@ -41,7 +41,7 @@
 
 任务：
 
-- 连接 IB Gateway / TWS。
+- 连接 IBKR Flex Web Service。
 - 获取账户列表。
 - 获取当前持仓。
 - 获取多币种现金。
@@ -52,7 +52,7 @@
 
 验收标准：
 
-- `sync_ibkr.py` 可以完成一次同步。
+- Flex Open Positions 可以每日自动同步。
 - Supabase 出现 IBKR 账户、持仓、现金。
 - 同步失败时有明确错误记录。
 

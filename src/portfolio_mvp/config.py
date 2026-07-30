@@ -49,9 +49,6 @@ class Settings:
             "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
         )
     )
-    ibkr_host: str = field(default_factory=lambda: _env("IBKR_HOST", "127.0.0.1"))
-    ibkr_port: int = field(default_factory=lambda: _env_int("IBKR_PORT", 7497))
-    ibkr_client_id: int = field(default_factory=lambda: _env_int("IBKR_CLIENT_ID", 11))
     ibkr_flex_token: str = field(default_factory=lambda: _env("IBKR_FLEX_TOKEN"))
     ibkr_flex_query_id: str = field(default_factory=lambda: _env("IBKR_FLEX_QUERY_ID", "1587428"))
 

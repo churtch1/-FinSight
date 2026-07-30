@@ -4,8 +4,8 @@ FinSight 是一个个人资产看板项目，用来把分散在券商、银行 P
 
 它的目标很直接：
 
-- 通过IBKR接口实时导入数据，银行通过结单PDF自动识别
-- 本地API安全同步+手机云端上传PDF导入，采集和整理资产数据
+- 通过 IBKR Flex 每日自动导入官方持仓和结算估值，银行通过结单 PDF 自动识别
+- 云端自动同步 + 手机上传 PDF，采集和整理资产数据
 - 把标准化后的结果写入 Supabase
 - 用一个适合手机和桌面查看的 Streamlit 看板随时查看整体资产状态
 
@@ -14,7 +14,7 @@ FinSight 是一个个人资产看板项目，用来把分散在券商、银行 P
 ## 项目能做什么
 
 - 汇总多账户、多币种、多资产类型的持仓数据
-- 同步 IBKR Gateway / TWS 的持仓和账户信息
+- 每日自动同步 IBKR Flex 的股票、ETF 和债券持仓
 - 导入汇丰中国 PDF 资产报告
 - 导入标准化 CSV 交易或快照数据
 - 将不同来源的数据整理成统一结构后写入 Supabase
@@ -48,7 +48,7 @@ IBKR / 汇丰 PDF / CSV
 
 推荐工作流：
 
-1. 在你自己的电脑上同步 IBKR、导入 PDF 或加载 CSV。
+1. 由云端每日自动同步 IBKR Flex，并按需导入 PDF 或加载 CSV。
 2. 将标准化后的资产数据写入 Supabase。
 3. 在手机或桌面浏览器里打开 Streamlit 看板查看最新状态。
 
@@ -63,7 +63,7 @@ IBKR / 汇丰 PDF / CSV
 
 ### 2. 数据导入
 
-- `scripts/sync_ibkr.py`：同步 IBKR 持仓和账户数据
+- IBKR Flex：看板每日首次打开时自动同步官方持仓和结算估值
 - `scripts/import_hsbc_pdf.py`：解析汇丰中国 PDF
 - `scripts/import_csv.py`：导入标准化 CSV
 - `scripts/load_fx_rates.py`：导入手动汇率
@@ -80,7 +80,7 @@ IBKR / 汇丰 PDF / CSV
 
 - Python 3.10+
 - 一个 Supabase 项目
-- 可选：IBKR Gateway 或 TWS
+- 已启用的 IBKR Flex Web Service
 
 ### 安装
 
@@ -105,9 +105,8 @@ SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 STREAMLIT_PASSWORD=
 FX_API_URL=https://open.er-api.com/v6/latest/USD
-IBKR_HOST=127.0.0.1
-IBKR_PORT=7497
-IBKR_CLIENT_ID=11
+IBKR_FLEX_TOKEN=
+IBKR_FLEX_QUERY_ID=1587428
 ```
 
 如果暂时没有配置 Supabase，应用也可以先使用本地样例数据运行。
@@ -132,9 +131,7 @@ start_dashboard.bat
 
 ### 同步 IBKR
 
-```powershell
-python scripts/sync_ibkr.py --account all
-```
+配置 Flex Token 和 Query ID 后，看板每日首次打开时自动同步，也可在行情刷新区手动重试。
 
 ### 导入汇丰中国 PDF
 

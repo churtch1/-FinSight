@@ -2,8 +2,8 @@
 
 这份项目适合做成下面这种结构：
 
-- 本地电脑负责：
-  - `IBKR` 同步
+- Streamlit Cloud 负责：
+  - `IBKR Flex` 每日自动同步
   - 汇丰 PDF 导入
   - 汇率导入
 - `Supabase` 负责：
@@ -12,7 +12,7 @@
   - 只读展示看板
   - 通过浏览器和手机访问
 
-这样做的好处是：云端不需要直接连接你的 `IBKR Gateway/TWS`，也不需要上传原始 PDF。
+这样做的好处是：云端不需要连接本地 `IBKR Gateway/TWS`，也不需要电脑长期在线。
 
 ## 1. 部署前准备
 
@@ -37,6 +37,8 @@ SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_ANON_KEY = "your-anon-key"
 STREAMLIT_PASSWORD = "your-dashboard-password"
 FX_API_URL = "https://open.er-api.com/v6/latest/USD"
+IBKR_FLEX_TOKEN = "your-flex-token"
+IBKR_FLEX_QUERY_ID = "1587428"
 ```
 
 说明：
@@ -74,32 +76,25 @@ SUPABASE_SERVICE_ROLE_KEY = "your-service-role-key"
 
 ## 4. 上线后的使用方式
 
-云端看板只负责读取 `Supabase` 中已经存在的数据。
-
-因此日常更新流程是：
-
-1. 在你自己的电脑上同步 `IBKR`
-2. 在你自己的电脑上导入汇丰 PDF，或者在云端看板中直接上传 PDF
-3. 数据写入 `Supabase`
-4. 手机或其他设备打开 Streamlit 云端链接查看最新看板
+云端看板每天首次打开时从 IBKR Flex 读取上一交易日的股票、ETF 和债券持仓，
+并写入 `Supabase`。银行 PDF 可以继续从云端看板上传。
 
 常用本地更新命令：
 
 ```powershell
 python scripts/load_fx_rates.py sample_data/fx_rates.csv
 python scripts/import_hsbc_pdf.py HSBC/资产配置报告.pdf
-python scripts/sync_ibkr.py --account all
 ```
 
 ## 5. 当前项目的实际部署边界
 
 当前这个项目已经适合“远程看板”部署，但不适合把下面这些动作搬到 Streamlit 云端：
 
-- 直接连接本地 `IBKR Gateway/TWS`
+- 盘中持续连接 `IBKR Gateway/TWS`
 - 上传和解析本地银行 PDF
 - 用 service role key 在公开前端执行写入
 
-如果后面你想进一步自动化，可以再加一个定时同步层，例如：
+如果后面需要在无人打开看板时也定时运行，可以再加一个调度层，例如：
 
 - 本地定时任务
 - 云函数 / 私有后端

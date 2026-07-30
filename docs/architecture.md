@@ -8,7 +8,7 @@
 
 ```text
 Windows 本地采集端
-  -> IB Gateway / TWS API
+  -> IBKR Flex Web Service
   -> 银行与券商 PDF 资产报告
   -> Python 解析、清洗、标准化
   -> Supabase 云数据库
@@ -23,7 +23,7 @@ Windows 本地采集端
 
 本地端负责接触敏感数据源和本地文件：
 
-- 连接 IB Gateway / TWS API。
+- 通过 IBKR Flex Web Service 获取每日官方持仓与结算估值。
 - 获取 IBKR 持仓、现金、交易、账户摘要。
 - 接收 HSBC 中国、招商银行、其他银行或券商资产配置 PDF。
 - 提取 PDF 文本与表格。
@@ -224,7 +224,7 @@ src/portfolio_mvp/
 
 ### IBKR
 
-IBKR 数据来自 IB Gateway / TWS API。
+IBKR 数据来自 Flex Web Service 的每日 Open Positions 报告。
 
 优先采集：
 

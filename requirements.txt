@@ -5,4 +5,3 @@ requests>=2.31
 python-dotenv>=1.0
 supabase>=2.4
 pypdf>=4.2
-ib-insync>=0.9.86

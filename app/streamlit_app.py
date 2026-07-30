@@ -53,7 +53,6 @@ AutomaticFundNavProvider = fund_nav_module.AutomaticFundNavProvider
 FundNav = fund_nav_module.FundNav
 latest_nav_map = fund_nav_module.latest_nav_map
 normalize_fund_code = fund_nav_module.normalize_fund_code
-from portfolio_mvp.integrations.ibkr import sync_ibkr_data
 from portfolio_mvp.integrations.ibkr_flex import IbkrFlexClient, sync_flex_positions
 from portfolio_mvp.market_quotes import MarketQuote, YahooMarketQuoteProvider, normalize_us_symbol
 from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
@@ -2324,36 +2323,6 @@ def can_write_from_dashboard(settings: Settings) -> bool:
     return settings.has_supabase_write_config
 
 
-def sync_ibkr_via_dashboard(account: str, settings: Settings) -> str:
-    client = get_supabase(use_service_role=True, settings=settings)
-    sync_started_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    import_id = create_import_record(
-        client,
-        source="ibkr",
-        source_type="api",
-        file_name=None,
-        file_hash=f"ibkr-{account}-{sync_started_at}",
-    )
-
-    try:
-        data = sync_ibkr_data(account=account, settings=settings)
-        for account_name in data.accounts:
-            summary = data.account_summaries.get(account_name, {})
-            upsert_account(client, "IBKR", account_name, summary.get("BaseCurrency", "USD") or "USD")
-
-        imported = import_normalized_rows(client, data.rows, import_id)
-        if imported == len(data.rows):
-            complete_import(client, import_id, imported, "completed")
-        else:
-            failed = len(data.rows) - imported
-            complete_import(client, import_id, imported, "needs_review", f"{failed} rows failed during import.")
-        return f"IBKR 同步完成：{imported}/{len(data.rows)} 条，覆盖 {len(data.accounts)} 个账户。"
-    except Exception as exc:
-        log_import_error(client, import_id, None, {"account": account}, str(exc))
-        complete_import(client, import_id, 0, "failed", str(exc))
-        raise RuntimeError(f"IBKR 同步失败：{exc}") from exc
-
-
 def sync_ibkr_flex_via_dashboard(settings: Settings) -> str:
     if not settings.ibkr_flex_token:
         raise RuntimeError("尚未配置 IBKR_FLEX_TOKEN。请先把 Token 放入 Streamlit Secrets。")
@@ -3350,99 +3319,9 @@ def render_operations_panel(imports: pd.DataFrame, errors: pd.DataFrame, positio
         render_import_status(imports, errors)
         return
 
-    left, right = st.columns(2)
-    with left:
-        st.markdown(
-            """
-            <div class="ops-card">
-                <div class="ops-topline ops-local"></div>
-                <div class="ops-tag ops-tag-local">本机操作</div>
-                <div class="ops-title">IBKR 同步</div>
-                <div class="muted-copy">适合你在电脑上打开看板时使用。先登录本机的 IB Gateway/TWS，再点击同步。</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        account = st.text_input("同步账户", value="all", key="ibkr_sync_account")
-        local_ready = st.toggle("我已在本机打开并登录 Gateway / TWS", value=False, key="ibkr_local_ready", width="stretch")
-        if st.button(
-            "同步 IBKR",
-            key="sync_ibkr_button",
-            type="primary",
-            icon=":material/sync:",
-            use_container_width=True,
-            disabled=not local_ready,
-        ):
-            try:
-                with st.spinner("正在同步 IBKR..."):
-                    message = sync_ibkr_via_dashboard(account.strip() or "all", settings)
-                load_data.clear()
-                push_flash("success", message)
-                st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
-
     render_smart_portfolio_upload(settings)
-    render_import_status(imports, errors)
-    return
-
-    with right:
-        st.markdown(
-            """
-            <div class="ops-card">
-                <div class="ops-topline ops-cloud"></div>
-                <div class="ops-tag ops-tag-cloud">云端上传</div>
-                <div class="ops-title">汇丰 PDF 上传</div>
-                <div class="muted-copy">这个入口支持手机使用。你可以直接从 iCloud 选择 PDF 上传，预检后再决定是否写入数据库。</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        uploaded_pdf = st.file_uploader("上传最新汇丰 PDF", type=["pdf"], key="hsbc_pdf_uploader")
-        dry_run = st.toggle("先预检，不写数据库", value=False, key="hsbc_pdf_dry_run", width="stretch")
-        button_label = "预检汇丰 PDF" if dry_run else "导入汇丰 PDF"
-        if st.button(
-            button_label,
-            key="import_hsbc_button",
-            icon=":material/upload_file:",
-            use_container_width=True,
-            disabled=uploaded_pdf is None,
-        ):
-            try:
-                with st.spinner("正在解析 PDF..."):
-                    message, preview = import_hsbc_pdf_via_dashboard(
-                        uploaded_pdf.name,
-                        uploaded_pdf.getvalue(),
-                        settings,
-                        dry_run=dry_run,
-                    )
-                st.session_state[HSBC_PREVIEW_KEY] = preview
-                st.session_state[HSBC_PREVIEW_NAME_KEY] = uploaded_pdf.name
-                if dry_run:
-                    st.success(message)
-                else:
-                    load_data.clear()
-                    push_flash("success", message)
-                    st.rerun()
-            except Exception as exc:
-                st.error(str(exc))
-
-        render_hsbc_preview()
-
     render_manual_positions_import(settings)
     render_import_status(imports, errors)
-    render_command_hint()
-
-
-def render_command_hint() -> None:
-    with st.expander("命令行入口", expanded=False):
-        st.code(
-            "python scripts/load_fx_rates.py sample_data/fx_rates.csv\n"
-            "python scripts/load_fund_navs.py --fund-code 270023\n"
-            "python scripts/import_hsbc_pdf.py HSBC/资产配置报告.pdf\n"
-            "python scripts/sync_ibkr.py --account all",
-            language="powershell",
-        )
 
 
 def render_overview(df: pd.DataFrame, display_currency: str) -> None:
