@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib
 import json
 import shutil
 import sys
@@ -35,7 +36,16 @@ if str(SRC) not in sys.path:
 from portfolio_mvp.config import Settings, get_settings
 from portfolio_mvp.db import MissingSupabaseConfig, fetch_dashboard_data, get_supabase
 from portfolio_mvp.fx import FxRate, convert_to_usd, fetch_online_usd_rates, latest_rate_from_rows
-from portfolio_mvp.fund_nav import AutomaticFundNavProvider, FundNav, latest_nav_map, normalize_fund_code
+import portfolio_mvp.fund_nav as fund_nav_module
+
+if not hasattr(fund_nav_module, "AutomaticFundNavProvider"):
+    importlib.invalidate_caches()
+    fund_nav_module = importlib.reload(fund_nav_module)
+
+AutomaticFundNavProvider = fund_nav_module.AutomaticFundNavProvider
+FundNav = fund_nav_module.FundNav
+latest_nav_map = fund_nav_module.latest_nav_map
+normalize_fund_code = fund_nav_module.normalize_fund_code
 from portfolio_mvp.integrations.ibkr import sync_ibkr_data
 from portfolio_mvp.market_quotes import MarketQuote, YahooMarketQuoteProvider, normalize_us_symbol
 from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
