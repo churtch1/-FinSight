@@ -47,6 +47,7 @@ FundNav = fund_nav_module.FundNav
 latest_nav_map = fund_nav_module.latest_nav_map
 normalize_fund_code = fund_nav_module.normalize_fund_code
 from portfolio_mvp.integrations.ibkr import sync_ibkr_data
+from portfolio_mvp.integrations.ibkr_flex import IbkrFlexClient, sync_flex_positions
 from portfolio_mvp.market_quotes import MarketQuote, YahooMarketQuoteProvider, normalize_us_symbol
 from portfolio_mvp.parsers.hsbc_cn_pdf import parse_hsbc_cn_pdf
 from portfolio_mvp.parsers.manual_positions import parse_manual_position_records
@@ -2346,6 +2347,67 @@ def sync_ibkr_via_dashboard(account: str, settings: Settings) -> str:
         raise RuntimeError(f"IBKR 同步失败：{exc}") from exc
 
 
+def sync_ibkr_flex_via_dashboard(settings: Settings) -> str:
+    if not settings.ibkr_flex_token:
+        raise RuntimeError("尚未配置 IBKR_FLEX_TOKEN。请先把 Token 放入 Streamlit Secrets。")
+    client = get_supabase(use_service_role=True, settings=settings)
+    flex = IbkrFlexClient(settings.ibkr_flex_token, settings.ibkr_flex_query_id)
+    positions = flex.fetch_positions()
+    if not positions:
+        return "IBKR Flex 报告没有返回未平仓持仓。"
+    report_date = max(position.report_date for position in positions)
+    import_id = create_import_record(
+        client,
+        source="ibkr_flex",
+        source_type="api",
+        file_name=f"FinSight Daily Positions {report_date.isoformat()}",
+        file_hash=f"ibkr-flex-{settings.ibkr_flex_query_id}-{report_date.isoformat()}",
+    )
+    try:
+        updated = sync_flex_positions(client, positions)
+        complete_import(client, import_id, updated, "completed")
+        unmatched = len(positions) - updated
+        suffix = f"，另有 {unmatched} 条尚未匹配现有代码" if unmatched else ""
+        return (
+            f"IBKR Flex 每日持仓同步完成：报告日期 {report_date.isoformat()}，"
+            f"更新 {updated}/{len(positions)} 条股票、ETF 和债券持仓{suffix}。"
+        )
+    except Exception as exc:
+        log_import_error(client, import_id, None, {"query_id": settings.ibkr_flex_query_id}, str(exc))
+        complete_import(client, import_id, 0, "failed", str(exc))
+        raise
+
+
+def auto_sync_ibkr_flex_once_daily(settings: Settings) -> None:
+    if not settings.ibkr_flex_token or not settings.has_supabase_write_config:
+        return
+    session_key = f"ibkr_flex_auto_sync_{date.today().isoformat()}"
+    if st.session_state.get(session_key):
+        return
+    st.session_state[session_key] = True
+    try:
+        client = get_supabase(use_service_role=True, settings=settings)
+        today_start = f"{date.today().isoformat()}T00:00:00"
+        completed = (
+            client.table("statement_imports")
+            .select("id")
+            .eq("source", "ibkr_flex")
+            .eq("status", "completed")
+            .gte("created_at", today_start)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if completed:
+            return
+        message = sync_ibkr_flex_via_dashboard(settings)
+        load_data.clear()
+        push_flash("success", message)
+    except Exception as exc:
+        push_flash("warning", f"IBKR Flex 自动同步暂未完成：{exc}")
+
+
 def _printable(value: object) -> object:
     if isinstance(value, Decimal):
         return str(value)
@@ -3200,7 +3262,23 @@ def render_market_refresh_panel(positions: pd.DataFrame, settings: Settings, usd
             caption += f"：{preview_names}"
         caption += "。"
     st.caption(caption)
-    col_fund, col_stock, col_gold = st.columns(3)
+    col_flex, col_fund, col_stock, col_gold = st.columns(4)
+    with col_flex:
+        if st.button(
+            "同步 IBKR 每日持仓",
+            key="hero_sync_ibkr_flex",
+            icon=":material/cloud_sync:",
+            use_container_width=True,
+            disabled=disabled or not settings.ibkr_flex_token,
+        ):
+            try:
+                with st.spinner("正在获取 IBKR Flex 每日持仓..."):
+                    message = sync_ibkr_flex_via_dashboard(settings)
+                load_data.clear()
+                push_flash("success", message)
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
     with col_fund:
         if st.button(
             f"刷新基金和QDII净值（{len(fund_codes)}个代码）",
@@ -3455,6 +3533,8 @@ def main() -> None:
     inject_styles()
     if not require_password():
         return
+    settings = get_settings()
+    auto_sync_ibkr_flex_once_daily(settings)
 
     try:
         positions, imports, errors, fx_rates, fund_navs, using_supabase = load_data()
@@ -3469,8 +3549,6 @@ def main() -> None:
     positions = apply_fund_nav_estimates(positions, fund_navs, rate_map)
     positions = add_pnl_columns(positions)
     st.session_state["usd_cny_snapshot"] = get_usd_cny_snapshot(rate_map)
-    settings = get_settings()
-
     render_flash()
     render_hero(positions, st.session_state.get("usd_cny_snapshot"), demo_mode=not using_supabase)
     render_market_refresh_panel(positions, settings, st.session_state.get("usd_cny_snapshot"))
