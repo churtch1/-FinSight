@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import hashlib
 import hmac
 import importlib
@@ -1123,13 +1124,15 @@ def render_flash() -> None:
 
 
 @st.cache_data(ttl=60)
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
     settings = get_settings()
     if settings.has_supabase_read_config:
         client = get_supabase(use_service_role=False, settings=settings)
         data = fetch_dashboard_data(client)
+        position_history = normalize_positions(pd.DataFrame(data["positions"]), latest_only=False)
         return (
-            normalize_positions(pd.DataFrame(data["positions"])),
+            latest_account_snapshots(position_history),
+            position_history,
             pd.DataFrame(data["imports"]),
             pd.DataFrame(data["errors"]),
             pd.DataFrame(data["fx_rates"]),
@@ -1139,7 +1142,7 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame,
     return load_sample_data()
 
 
-def normalize_positions(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_positions(df: pd.DataFrame, *, latest_only: bool = True) -> pd.DataFrame:
     if df.empty:
         return empty_positions()
 
@@ -1170,7 +1173,7 @@ def normalize_positions(df: pd.DataFrame) -> pd.DataFrame:
         lambda row: localized_instrument_name(row["symbol"], row["instrument_name"]),
         axis=1,
     )
-    return latest_account_snapshots(df)
+    return latest_account_snapshots(df) if latest_only else df
 
 
 def coerce_position_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -1248,9 +1251,10 @@ def empty_positions() -> pd.DataFrame:
     )
 
 
-def load_sample_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
+def load_sample_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
     sample_path = ROOT / "sample_data" / "positions_demo.csv"
-    df = normalize_positions(pd.read_csv(sample_path)) if sample_path.exists() else empty_positions()
+    history = normalize_positions(pd.read_csv(sample_path), latest_only=False) if sample_path.exists() else empty_positions()
+    df = latest_account_snapshots(history)
     imports = pd.DataFrame(
         [{"source": "demo", "source_type": "csv", "status": "demo_sample", "rows_imported": len(df)}]
     )
@@ -1274,7 +1278,7 @@ def load_sample_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Dat
             }
         ]
     )
-    return df, imports, errors, fx_rates, fund_navs, False
+    return df, history, imports, errors, fx_rates, fund_navs, False
 
 
 def canonical_currency(value: str) -> str:
@@ -1658,24 +1662,19 @@ def render_hero(df: pd.DataFrame, usd_cny_snapshot: dict[str, str] | None = None
             f"<div class=\"hero-fx-meta\">{usd_cny_snapshot['meta']}</div>"
             "</div>"
         )
-    st.markdown(
-        f"""
-        <div class="hero-card">
-            <div class="hero-kicker">Portfolio cockpit</div>
-            <div class="hero-title">LXY的Finsight</div>
-            <div class="hero-subtitle">适合手机和桌面查看的合并资产看板，汇总盈透证券、汇丰、招商银行和支付宝持仓、币种结构和盈亏变化。</div>
-            <div class="badge-row">
-                <span class="badge">最新估值 {latest_date}</span>
-                <span class="badge">{provider_count} 家机构</span>
-                <span class="badge">{positions_count} 条持仓</span>
-                <span class="badge">主题跟随系统</span>
-                {mode_badge}
-            </div>
-            {fx_block}
-        </div>
-        """,
-        unsafe_allow_html=True,
+    hero_html = (
+        '<div class="hero-card">'
+        '<div class="hero-kicker">Portfolio cockpit</div>'
+        '<div class="hero-title">LXY的Finsight</div>'
+        '<div class="hero-subtitle">适合手机和桌面查看的合并资产看板，汇总盈透证券、汇丰、招商银行和支付宝持仓、币种结构和盈亏变化。</div>'
+        '<div class="badge-row">'
+        f'<span class="badge">最新估值 {latest_date}</span>'
+        f'<span class="badge">{provider_count} 家机构</span>'
+        f'<span class="badge">{positions_count} 条持仓</span>'
+        '<span class="badge">主题跟随系统</span>'
+        f"{mode_badge}</div>{fx_block}</div>"
     )
+    st.markdown(hero_html, unsafe_allow_html=True)
 
 
 def render_primary_controls(df: pd.DataFrame) -> tuple[str, str]:
@@ -3324,8 +3323,180 @@ def render_operations_panel(imports: pd.DataFrame, errors: pd.DataFrame, positio
     render_import_status(imports, errors)
 
 
-def render_overview(df: pd.DataFrame, display_currency: str) -> None:
+def _return_history_with_usd_pnl(history: pd.DataFrame) -> pd.DataFrame:
+    if history.empty:
+        return history
+    output = history.copy()
+    output["recognized_pnl"] = output["total_pnl_original"].fillna(output["unrealized_pnl_original"])
+    derived = output["market_value_original"] - output["cost_original"]
+    output["recognized_pnl"] = output["recognized_pnl"].fillna(derived.where(output["cost_original"].notna()))
+    ratio = output["market_value_usd"] / output["market_value_original"]
+    ratio = ratio.replace([float("inf"), -float("inf")], pd.NA)
+    ratio = ratio.where(ratio.notna(), output["currency"].eq("USD").map({True: 1.0, False: pd.NA}))
+    output["recognized_pnl_usd"] = output["recognized_pnl"] * ratio
+    return output
+
+
+def build_daily_return_series(
+    history: pd.DataFrame,
+    mode: str,
+    month_start: date,
+    month_end: date,
+    display_currency: str,
+    rate_map: dict[str, FxRate],
+) -> pd.DataFrame:
+    history = _return_history_with_usd_pnl(history)
+    if history.empty:
+        return pd.DataFrame(columns=["date", "return", "updated_accounts"])
+    asset_groups = {
+        "总收益": {"wealth_product", "stock", "fund", "bond", "gold", "crypto", "other"},
+        "理财收益": {"wealth_product"},
+        "投资收益": {"stock", "fund", "bond", "gold", "crypto"},
+    }
+    filtered = history[history["asset_type"].isin(asset_groups[mode])].copy()
+    filtered = filtered[filtered["valuation_date"].notna()]
+    if filtered.empty:
+        return pd.DataFrame(columns=["date", "return", "updated_accounts"])
+
+    first_day = month_start - timedelta(days=1)
+    all_days = pd.date_range(first_day, month_end, freq="D").date
+    accounts = list(filtered.groupby(["provider", "account_name"], dropna=False))
+    cumulative: dict[date, float | None] = {}
+    updated_accounts: dict[date, int] = {}
+    for day in all_days:
+        total_usd = 0.0
+        has_value = False
+        updated = 0
+        for _, account_rows in accounts:
+            eligible = account_rows[account_rows["valuation_date"] <= day]
+            if eligible.empty:
+                continue
+            snapshot_date = eligible["valuation_date"].max()
+            snapshot = eligible[eligible["valuation_date"] == snapshot_date]
+            pnl = snapshot["recognized_pnl_usd"].sum(min_count=1)
+            if pd.notna(pnl):
+                total_usd += float(pnl)
+                has_value = True
+            if snapshot_date == day:
+                updated += 1
+        cumulative[day] = total_usd if has_value else None
+        updated_accounts[day] = updated
+
+    rows = []
+    previous = cumulative.get(first_day)
+    for day in pd.date_range(month_start, month_end, freq="D").date:
+        current = cumulative.get(day)
+        daily_usd = current - previous if current is not None and previous is not None else None
+        daily_value = (
+            convert_amount(daily_usd, "USD", display_currency, rate_map)
+            if daily_usd is not None
+            else None
+        )
+        rows.append({"date": day, "return": daily_value, "updated_accounts": updated_accounts.get(day, 0)})
+        previous = current
+    return pd.DataFrame(rows)
+
+
+def render_return_calendar(
+    history: pd.DataFrame,
+    display_currency: str,
+    rate_map: dict[str, FxRate],
+) -> None:
+    st.markdown("<div class='section-title'>收益日历</div>", unsafe_allow_html=True)
+    valid_dates = [item for item in history.get("valuation_date", pd.Series(dtype=object)).dropna().tolist() if isinstance(item, date)]
+    if not valid_dates:
+        st.info("尚无历史估值快照，收益日历将在产生至少两个结算日后显示。")
+        return
+
+    latest = max(valid_dates)
+    earliest = min(valid_dates)
+    month_options = []
+    cursor = date(latest.year, latest.month, 1)
+    floor = date(earliest.year, earliest.month, 1)
+    while cursor >= floor and len(month_options) < 24:
+        month_options.append(cursor)
+        cursor = date(cursor.year - 1, 12, 1) if cursor.month == 1 else date(cursor.year, cursor.month - 1, 1)
+
+    control_left, control_right = st.columns([2, 1])
+    with control_left:
+        mode = st.segmented_control(
+            "收益口径",
+            options=["总收益", "理财收益", "投资收益"],
+            default=st.session_state.get("return_calendar_mode", "总收益"),
+            key="return_calendar_mode",
+        )
+    with control_right:
+        selected_month = st.selectbox(
+            "月份",
+            options=month_options,
+            format_func=lambda item: f"{item.year}年{item.month}月",
+            key="return_calendar_month",
+        )
+    mode = mode or "总收益"
+    _, days_in_month = calendar.monthrange(selected_month.year, selected_month.month)
+    month_end = date(selected_month.year, selected_month.month, days_in_month)
+    series = build_daily_return_series(history, mode, selected_month, month_end, display_currency, rate_map)
+    values = {row["date"]: row for row in series.to_dict("records")}
+    available = series["return"].dropna() if not series.empty else pd.Series(dtype=float)
+    month_return = float(available.sum()) if not available.empty else None
+    positive_days = int((available > 0).sum()) if not available.empty else 0
+    negative_days = int((available < 0).sum()) if not available.empty else 0
+
+    metrics = st.columns(3)
+    metrics[0].metric(f"{mode} · 本月", metric_money(month_return, display_currency))
+    metrics[1].metric("盈利日", str(positive_days))
+    metrics[2].metric("亏损日", str(negative_days))
+
+    weekday_labels = "".join(f"<div class='return-weekday'>{label}</div>" for label in ["一", "二", "三", "四", "五", "六", "日"])
+    cells: list[str] = []
+    for week in calendar.monthcalendar(selected_month.year, selected_month.month):
+        for day_number in week:
+            if day_number == 0:
+                cells.append("<div class='return-day return-day-empty'></div>")
+                continue
+            day = date(selected_month.year, selected_month.month, day_number)
+            row = values.get(day, {})
+            value = row.get("return")
+            updates = int(row.get("updated_accounts") or 0)
+            if value is None or pd.isna(value):
+                value_text = "—"
+                tone = "neutral"
+            else:
+                value_text = f"{value:+,.0f}"
+                tone = "positive" if value > 0 else "negative" if value < 0 else "neutral"
+            status = f"{updates} 个账户结算" if updates else "沿用最近估值"
+            cells.append(
+                f"<div class='return-day return-day-{tone}' title='{status}'>"
+                f"<div class='return-day-number'>{day_number}</div>"
+                f"<div class='return-day-value'>{value_text}</div>"
+                f"<div class='return-day-status'>{status}</div></div>"
+            )
+    calendar_html = (
+        "<style>"
+        ".return-calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin:10px 0 4px}"
+        ".return-weekday{text-align:center;color:#6b7280;font-size:12px;font-weight:700;padding:4px}"
+        ".return-day{min-height:82px;border:1px solid #e5e7eb;border-radius:13px;padding:9px;background:#fff}"
+        ".return-day-empty{visibility:hidden}.return-day-number{font-size:12px;color:#6b7280}"
+        ".return-day-value{font-size:15px;font-weight:750;margin-top:8px}.return-day-status{font-size:9px;color:#9ca3af;margin-top:6px}"
+        ".return-day-positive{background:#f0fdf4;border-color:#bbf7d0}.return-day-positive .return-day-value{color:#15803d}"
+        ".return-day-negative{background:#fff1f2;border-color:#fecdd3}.return-day-negative .return-day-value{color:#be123c}"
+        ".return-day-neutral .return-day-value{color:#64748b}"
+        "@media(max-width:700px){.return-calendar{gap:3px}.return-day{min-height:66px;padding:6px;border-radius:9px}"
+        ".return-day-value{font-size:11px}.return-day-status{display:none}}</style>"
+        f"<div class='return-calendar'>{weekday_labels}{''.join(cells)}</div>"
+    )
+    st.markdown(calendar_html, unsafe_allow_html=True)
+    st.caption("每日收益＝相邻结算日累计已识别盈亏的变化；未在当天更新的账户沿用最近估值，不会被误算为零资产。")
+
+
+def render_overview(
+    df: pd.DataFrame,
+    display_currency: str,
+    history: pd.DataFrame,
+    rate_map: dict[str, FxRate],
+) -> None:
     render_metrics(df, display_currency)
+    render_return_calendar(history, display_currency, rate_map)
     render_spotlight_panels(df, display_currency)
 
 
@@ -3423,7 +3594,7 @@ def main() -> None:
     auto_sync_ibkr_flex_once_daily(settings)
 
     try:
-        positions, imports, errors, fx_rates, fund_navs, using_supabase = load_data()
+        positions, position_history, imports, errors, fx_rates, fund_navs, using_supabase = load_data()
     except MissingSupabaseConfig as exc:
         st.error(str(exc))
         st.stop()
@@ -3448,7 +3619,7 @@ def main() -> None:
     positions = add_display_columns(positions, display_currency, rate_map)
 
     if section == "总览":
-        render_overview(positions, display_currency)
+        render_overview(positions, display_currency, position_history, rate_map)
     elif section == "结构":
         render_structure(positions, display_currency)
     elif section == "持仓":

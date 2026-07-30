@@ -113,6 +113,71 @@ def test_apply_fund_nav_estimates_updates_fund_value_and_pnl() -> None:
     assert updated.loc[0, "fund_nav_date"] == "2026-05-11"
 
 
+def test_daily_return_series_supports_total_wealth_and_investment_modes() -> None:
+    dashboard = load_dashboard_module()
+    history = pd.DataFrame(
+        [
+            {
+                "provider": "IBKR",
+                "account_name": "A",
+                "valuation_date": date(2026, 7, 1),
+                "asset_type": "stock",
+                "currency": "USD",
+                "market_value_original": 1100,
+                "market_value_usd": 1100,
+                "cost_original": 1000,
+                "total_pnl_original": 100,
+                "unrealized_pnl_original": 100,
+            },
+            {
+                "provider": "IBKR",
+                "account_name": "A",
+                "valuation_date": date(2026, 7, 2),
+                "asset_type": "stock",
+                "currency": "USD",
+                "market_value_original": 1120,
+                "market_value_usd": 1120,
+                "cost_original": 1000,
+                "total_pnl_original": 120,
+                "unrealized_pnl_original": 120,
+            },
+            {
+                "provider": "CMB",
+                "account_name": "B",
+                "valuation_date": date(2026, 7, 1),
+                "asset_type": "wealth_product",
+                "currency": "USD",
+                "market_value_original": 1050,
+                "market_value_usd": 1050,
+                "cost_original": 1000,
+                "total_pnl_original": 50,
+                "unrealized_pnl_original": 50,
+            },
+            {
+                "provider": "CMB",
+                "account_name": "B",
+                "valuation_date": date(2026, 7, 2),
+                "asset_type": "wealth_product",
+                "currency": "USD",
+                "market_value_original": 1055,
+                "market_value_usd": 1055,
+                "cost_original": 1000,
+                "total_pnl_original": 55,
+                "unrealized_pnl_original": 55,
+            },
+        ]
+    )
+    rates = {"USD": dashboard.FxRate("USD", "USD", Decimal("1"), date(2026, 7, 2), "identity")}
+
+    total = dashboard.build_daily_return_series(history, "总收益", date(2026, 7, 1), date(2026, 7, 2), "USD", rates)
+    wealth = dashboard.build_daily_return_series(history, "理财收益", date(2026, 7, 1), date(2026, 7, 2), "USD", rates)
+    investment = dashboard.build_daily_return_series(history, "投资收益", date(2026, 7, 1), date(2026, 7, 2), "USD", rates)
+
+    assert total.loc[1, "return"] == 25
+    assert wealth.loc[1, "return"] == 5
+    assert investment.loc[1, "return"] == 20
+
+
 def test_has_valid_auth_query_accepts_signed_unexpired_token(monkeypatch) -> None:
     dashboard = load_dashboard_module()
     settings = SimpleNamespace(streamlit_password="secret")
