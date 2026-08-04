@@ -3272,13 +3272,37 @@ def refresh_gold_quotes_via_dashboard(positions: pd.DataFrame, settings: Setting
 
 
 def auto_refresh_funds_and_gold_once_daily(positions: pd.DataFrame, settings: Settings) -> None:
-    """Refresh non-IBKR market data once per browser session/day, then reload the dashboard."""
+    """Refresh once per calendar day globally, not once per Streamlit rerun/session."""
     if not settings.has_supabase_write_config or positions.empty:
         return
     session_key = f"fund_gold_auto_refresh_{date.today().isoformat()}"
     if st.session_state.get(session_key):
         return
+    client = get_supabase(use_service_role=True, settings=settings)
+    refresh_hash = f"daily-market-refresh-{date.today().isoformat()}"
+    completed = (
+        client.table("statement_imports")
+        .select("id")
+        .eq("source", "daily_market_refresh")
+        .eq("file_hash", refresh_hash)
+        .eq("status", "completed")
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if completed:
+        st.session_state[session_key] = True
+        return
+
     st.session_state[session_key] = True
+    refresh_id = create_import_record(
+        client,
+        source="daily_market_refresh",
+        source_type="api",
+        file_name=f"Daily fund and gold refresh {date.today().isoformat()}",
+        file_hash=refresh_hash,
+    )
 
     messages: list[str] = []
     errors: list[str] = []
@@ -3292,6 +3316,14 @@ def auto_refresh_funds_and_gold_once_daily(positions: pd.DataFrame, settings: Se
             messages.append(refresh_gold_quotes_via_dashboard(positions, settings))
         except Exception as exc:
             errors.append(f"黄金行情：{exc}")
+
+    complete_import(
+        client,
+        refresh_id,
+        len(messages),
+        "completed",
+        "；".join(errors) if errors else None,
+    )
 
     if messages:
         load_data.clear()
