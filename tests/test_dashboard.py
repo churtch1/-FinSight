@@ -178,6 +178,71 @@ def test_daily_return_series_supports_total_wealth_and_investment_modes() -> Non
     assert investment.loc[1, "return"] == 20
 
 
+def test_complete_account_snapshot_carries_unchanged_holdings_forward() -> None:
+    dashboard = load_dashboard_module()
+
+    class Query:
+        def __init__(self, writes):
+            self.writes = writes
+            self.payload = None
+
+        def upsert(self, payload, on_conflict=None):
+            self.payload = payload
+            return self
+
+        def execute(self):
+            self.writes.append(self.payload)
+            return SimpleNamespace(data=[])
+
+    class Client:
+        def __init__(self):
+            self.writes = []
+
+        def table(self, name):
+            assert name == "positions_current"
+            return Query(self.writes)
+
+    rows = [
+        {
+            "account_id": "account-1",
+            "instrument_id": "fund-1",
+            "quantity": "100",
+            "price_original": "1.00",
+            "market_value_original": "100.00",
+            "currency": "CNY",
+            "valuation_date": "2026-08-03",
+            "instruments": {"symbol": "012920", "asset_type": "fund"},
+        },
+        {
+            "account_id": "account-1",
+            "instrument_id": "cash-1",
+            "quantity": "1",
+            "price_original": "500.00",
+            "market_value_original": "500.00",
+            "currency": "CNY",
+            "valuation_date": "2026-08-03",
+            "instruments": {"symbol": "CNY CASH", "asset_type": "cash"},
+        },
+    ]
+    changes = {
+        ("account-1", "fund-1"): (
+            date(2026, 8, 4),
+            {"price_original": "1.05", "market_value_original": "105.00"},
+        )
+    }
+    client = Client()
+
+    written = dashboard.write_complete_account_snapshots(client, rows, changes)
+
+    assert written == 2
+    assert {row["instrument_id"] for row in client.writes} == {"fund-1", "cash-1"}
+    assert all(row["valuation_date"] == "2026-08-04" for row in client.writes)
+    fund = next(row for row in client.writes if row["instrument_id"] == "fund-1")
+    cash = next(row for row in client.writes if row["instrument_id"] == "cash-1")
+    assert fund["market_value_original"] == "105.00"
+    assert cash["market_value_original"] == "500.00"
+
+
 def test_has_valid_auth_query_accepts_signed_unexpired_token(monkeypatch) -> None:
     dashboard = load_dashboard_module()
     settings = SimpleNamespace(streamlit_password="secret")

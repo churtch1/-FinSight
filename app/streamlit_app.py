@@ -3055,20 +3055,75 @@ def cny_to_usd_rate_from_client(client: Any) -> FxRate | None:
         return None
 
 
+POSITION_SNAPSHOT_COLUMNS = (
+    "account_id,instrument_id,quantity,price_original,market_value_original,currency,"
+    "market_value_usd,fx_rate_to_usd,fx_rate_source,fx_rate_date,valuation_date,"
+    "cost_original,unrealized_pnl_original,income_original,total_pnl_original,pnl_pct,"
+    "quantity_source,estimate_note,instruments(symbol,asset_type)"
+)
+
+
+def latest_position_rows_for_snapshot(client: Any) -> list[dict[str, Any]]:
+    rows = client.table("positions_current").select(POSITION_SNAPSHOT_COLUMNS).execute().data or []
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row.get("account_id") or ""), str(row.get("instrument_id") or ""))
+        existing = latest.get(key)
+        if existing is None or str(row.get("valuation_date") or "") > str(existing.get("valuation_date") or ""):
+            latest[key] = row
+    return list(latest.values())
+
+
+def snapshot_payload(row: dict[str, Any], valuation_date: date) -> dict[str, Any]:
+    allowed = {
+        "account_id", "instrument_id", "quantity", "price_original", "market_value_original",
+        "currency", "market_value_usd", "fx_rate_to_usd", "fx_rate_source", "fx_rate_date",
+        "cost_original", "unrealized_pnl_original", "income_original", "total_pnl_original",
+        "pnl_pct", "quantity_source", "estimate_note",
+    }
+    payload = {key: value for key, value in row.items() if key in allowed}
+    payload["valuation_date"] = valuation_date.isoformat()
+    return payload
+
+
+def write_complete_account_snapshots(
+    client: Any,
+    latest_rows: list[dict[str, Any]],
+    changed_payloads: dict[tuple[str, str], tuple[date, dict[str, Any]]],
+) -> int:
+    """Write whole-account daily snapshots so partial quote refreshes never hide other holdings."""
+    account_dates: dict[str, date] = {}
+    for (account_id, _), (snapshot_date, _) in changed_payloads.items():
+        current = account_dates.get(account_id)
+        if current is None or snapshot_date > current:
+            account_dates[account_id] = snapshot_date
+    written = 0
+    for row in latest_rows:
+        account_id = str(row.get("account_id") or "")
+        instrument_id = str(row.get("instrument_id") or "")
+        snapshot_date = account_dates.get(account_id)
+        if snapshot_date is None:
+            continue
+        payload = snapshot_payload(row, snapshot_date)
+        change = changed_payloads.get((account_id, instrument_id))
+        if change is not None:
+            payload.update(change[1])
+        client.table("positions_current").upsert(
+            payload,
+            on_conflict="account_id,instrument_id,valuation_date",
+        ).execute()
+        written += 1
+    return written
+
+
 def update_fund_positions_from_dashboard(client: Any, navs: list[FundNav]) -> int:
     nav_map = {nav.fund_code: nav for nav in navs if nav.status == "ok" and nav.unit_nav > 0}
     if not nav_map:
         return 0
 
     fx_rows = client.table("fx_rates").select("*").order("rate_date", desc=True).execute().data or []
-    updated = 0
-    positions = (
-        client.table("positions_current")
-        .select("id,quantity,currency,cost_original,market_value_original,quantity_source,instruments(symbol,asset_type)")
-        .execute()
-        .data
-        or []
-    )
+    positions = latest_position_rows_for_snapshot(client)
+    changes: dict[tuple[str, str], tuple[date, dict[str, Any]]] = {}
     for position in positions:
         instrument = position.get("instruments") or {}
         if str(instrument.get("asset_type") or "") != "fund":
@@ -3108,9 +3163,9 @@ def update_fund_positions_from_dashboard(client: Any, navs: list[FundNav]) -> in
             payload["total_pnl_original"] = str(pnl)
             if Decimal(str(cost)) != 0:
                 payload["pnl_pct"] = str((pnl / Decimal(str(cost))).quantize(Decimal("0.000001")))
-        client.table("positions_current").update(payload).eq("id", position["id"]).execute()
-        updated += 1
-    return updated
+        changes[(str(position["account_id"]), str(position["instrument_id"]))] = (nav.nav_date, payload)
+    write_complete_account_snapshots(client, positions, changes)
+    return len(changes)
 
 
 def update_position_market_quotes_from_dashboard(client: Any, quotes: dict[str, MarketQuote]) -> int:
@@ -3118,17 +3173,12 @@ def update_position_market_quotes_from_dashboard(client: Any, quotes: dict[str, 
         return 0
 
     fx_rows = client.table("fx_rates").select("*").order("rate_date", desc=True).execute().data or []
-    updated = 0
+    positions = latest_position_rows_for_snapshot(client)
+    changes: dict[tuple[str, str], tuple[date, dict[str, Any]]] = {}
     for symbol, quote in quotes.items():
-        positions = (
-            client.table("positions_current")
-            .select("id,quantity,cost_original,instruments(symbol,asset_type)")
-            .eq("currency", quote.currency)
-            .execute()
-            .data
-            or []
-        )
         for position in positions:
+            if str(position.get("currency") or "").upper() != quote.currency:
+                continue
             instrument = position.get("instruments") or {}
             is_gold_quote = symbol == "GOLD-CNY-G"
             is_gold_position = str(instrument.get("asset_type") or "") == "gold"
@@ -3157,11 +3207,12 @@ def update_position_market_quotes_from_dashboard(client: Any, quotes: dict[str, 
                 payload["total_pnl_original"] = str(pnl)
                 if Decimal(str(cost)) != 0:
                     payload["pnl_pct"] = str((pnl / Decimal(str(cost))).quantize(Decimal("0.000001")))
-            client.table("positions_current").update(
-                payload
-            ).eq("id", position["id"]).execute()
-            updated += 1
-    return updated
+            changes[(str(position["account_id"]), str(position["instrument_id"]))] = (
+                quote.as_of.date(),
+                payload,
+            )
+    write_complete_account_snapshots(client, positions, changes)
+    return len(changes)
 
 
 def refresh_us_stock_quotes_via_dashboard(positions: pd.DataFrame, settings: Settings) -> str:
@@ -3218,6 +3269,37 @@ def refresh_gold_quotes_via_dashboard(positions: pd.DataFrame, settings: Setting
         return f"暂时没有获取到黄金行情{detail}，请稍后再试。"
     updated = update_position_market_quotes_from_dashboard(client, {quote.symbol: quote})
     return f"黄金行情刷新完成：最新约 {quote.price} 元/克，更新 {updated}/{count} 条黄金持仓。"
+
+
+def auto_refresh_funds_and_gold_once_daily(positions: pd.DataFrame, settings: Settings) -> None:
+    """Refresh non-IBKR market data once per browser session/day, then reload the dashboard."""
+    if not settings.has_supabase_write_config or positions.empty:
+        return
+    session_key = f"fund_gold_auto_refresh_{date.today().isoformat()}"
+    if st.session_state.get(session_key):
+        return
+    st.session_state[session_key] = True
+
+    messages: list[str] = []
+    errors: list[str] = []
+    if fund_codes_from_positions(positions):
+        try:
+            messages.append(refresh_fund_navs_via_dashboard(positions, settings))
+        except Exception as exc:
+            errors.append(f"基金净值：{exc}")
+    if gold_positions_count(positions):
+        try:
+            messages.append(refresh_gold_quotes_via_dashboard(positions, settings))
+        except Exception as exc:
+            errors.append(f"黄金行情：{exc}")
+
+    if messages:
+        load_data.clear()
+        push_flash("success", "每日基金与黄金快照已更新。" + " ".join(messages))
+    if errors:
+        push_flash("warning", "每日行情部分更新失败：" + "；".join(errors))
+    if messages or errors:
+        st.rerun()
 
 
 def render_market_refresh_panel(positions: pd.DataFrame, settings: Settings, usd_cny_snapshot: dict[str, str] | None) -> None:
@@ -3598,6 +3680,8 @@ def main() -> None:
     except MissingSupabaseConfig as exc:
         st.error(str(exc))
         st.stop()
+
+    auto_refresh_funds_and_gold_once_daily(positions, settings)
 
     if not using_supabase:
         st.warning("当前是演示模式，页面展示的是仓库自带的 demo 样例数据，不是你的真实持仓。配置 Supabase 后会自动读取你的云端资产数据。")
