@@ -243,6 +243,34 @@ def test_complete_account_snapshot_carries_unchanged_holdings_forward() -> None:
     assert cash["market_value_original"] == "500.00"
 
 
+def test_latest_account_snapshot_hides_zero_quantity_closed_positions() -> None:
+    dashboard = load_dashboard_module()
+    rows = pd.DataFrame(
+        [
+            {
+                "provider": "IBKR",
+                "account_name": "U1",
+                "valuation_date": date(2026, 8, 3),
+                "symbol": "AAPL",
+                "quantity": 2,
+                "market_value_original": 400,
+            },
+            {
+                "provider": "IBKR",
+                "account_name": "U1",
+                "valuation_date": date(2026, 8, 3),
+                "symbol": "SGOV",
+                "quantity": 0,
+                "market_value_original": 0,
+            },
+        ]
+    )
+
+    latest = dashboard.latest_account_snapshots(rows)
+
+    assert latest["symbol"].tolist() == ["AAPL"]
+
+
 def test_has_valid_auth_query_accepts_signed_unexpired_token(monkeypatch) -> None:
     dashboard = load_dashboard_module()
     settings = SimpleNamespace(streamlit_password="secret")

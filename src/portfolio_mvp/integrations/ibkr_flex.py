@@ -131,6 +131,8 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
     }
     by_isin = {str(row.get("isin") or "").upper(): row for row in instruments if row.get("isin")}
     updated = 0
+    open_instruments_by_account: dict[str, set[str]] = {}
+    report_dates_by_account: dict[str, date] = {}
 
     for position in positions:
         account_uuid = account_map.get(position.account_id)
@@ -145,6 +147,10 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
         if not instrument:
             continue
         instrument_id = str(instrument["id"])
+        open_instruments_by_account.setdefault(account_uuid, set()).add(instrument_id)
+        current_report_date = report_dates_by_account.get(account_uuid)
+        if current_report_date is None or position.report_date > current_report_date:
+            report_dates_by_account[account_uuid] = position.report_date
         instrument_updates: dict[str, Any] = {}
         if position.description and str(instrument.get("name") or "").startswith(("US-T", "IBCID")):
             instrument_updates["name"] = position.description
@@ -182,7 +188,78 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
             on_conflict="account_id,instrument_id,valuation_date",
         ).execute()
         updated += 1
+
+    for account_uuid, report_date in report_dates_by_account.items():
+        _reconcile_flex_account_snapshot(
+            client,
+            account_uuid=account_uuid,
+            report_date=report_date,
+            open_instrument_ids=open_instruments_by_account.get(account_uuid, set()),
+        )
     return updated
+
+
+def _reconcile_flex_account_snapshot(
+    client: Any,
+    *,
+    account_uuid: str,
+    report_date: date,
+    open_instrument_ids: set[str],
+) -> None:
+    """Close securities absent from Flex and carry non-security rows into a complete snapshot."""
+    rows = (
+        client.table("positions_current")
+        .select(
+            "account_id,instrument_id,quantity,price_original,market_value_original,currency,"
+            "market_value_usd,fx_rate_to_usd,fx_rate_source,fx_rate_date,valuation_date,"
+            "cost_original,unrealized_pnl_original,income_original,total_pnl_original,pnl_pct,"
+            "quantity_source,estimate_note,instruments(asset_type)"
+        )
+        .eq("account_id", account_uuid)
+        .execute()
+        .data
+        or []
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        instrument_id = str(row.get("instrument_id") or "")
+        existing = latest.get(instrument_id)
+        if existing is None or str(row.get("valuation_date") or "") > str(existing.get("valuation_date") or ""):
+            latest[instrument_id] = row
+
+    allowed = {
+        "account_id", "instrument_id", "quantity", "price_original", "market_value_original",
+        "currency", "market_value_usd", "fx_rate_to_usd", "fx_rate_source", "fx_rate_date",
+        "cost_original", "unrealized_pnl_original", "income_original", "total_pnl_original",
+        "pnl_pct", "quantity_source", "estimate_note",
+    }
+    security_types = {"stock", "fund", "bond"}
+    for instrument_id, row in latest.items():
+        if instrument_id in open_instrument_ids:
+            continue
+        payload = {key: value for key, value in row.items() if key in allowed}
+        payload["valuation_date"] = report_date.isoformat()
+        asset_type = str((row.get("instruments") or {}).get("asset_type") or "")
+        if asset_type in security_types:
+            payload.update(
+                {
+                    "quantity": "0",
+                    "market_value_original": "0",
+                    "market_value_usd": "0",
+                    "cost_original": "0",
+                    "unrealized_pnl_original": "0",
+                    "income_original": "0",
+                    "total_pnl_original": "0",
+                    "pnl_pct": "0",
+                    "fx_rate_source": "ibkr_flex:closed",
+                    "fx_rate_date": report_date.isoformat(),
+                    "estimate_note": "Closed because the security is absent from the latest IBKR Flex open-positions report.",
+                }
+            )
+        client.table("positions_current").upsert(
+            payload,
+            on_conflict="account_id,instrument_id,valuation_date",
+        ).execute()
 
 
 def _raise_flex_error(root: ET.Element) -> None:

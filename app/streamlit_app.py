@@ -1322,7 +1322,9 @@ def latest_account_snapshots(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     latest_dates = df.groupby(["provider", "account_name"], dropna=False)["valuation_date"].transform("max")
-    return df[df["valuation_date"] == latest_dates].copy()
+    latest = df[df["valuation_date"] == latest_dates].copy()
+    active = latest["quantity"].fillna(0).abs().gt(0) | latest["market_value_original"].fillna(0).abs().gt(0)
+    return latest[active].copy()
 
 
 def build_rate_map(fx_rates: pd.DataFrame) -> dict[str, FxRate]:
