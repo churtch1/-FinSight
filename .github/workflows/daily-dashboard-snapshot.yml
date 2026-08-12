@@ -1,0 +1,37 @@
+name: Daily dashboard snapshot
+
+on:
+  schedule:
+    # GitHub Actions cron uses UTC. 02:00 UTC = 10:00 Asia/Shanghai.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-dashboard-snapshot
+  cancel-in-progress: false
+
+jobs:
+  open-dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DASHBOARD_URL: https://churtch2.streamlit.app/
+      STREAMLIT_PASSWORD: ${{ secrets.STREAMLIT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install browser
+        run: |
+          python -m pip install --disable-pip-version-check playwright==1.54.0
+          python -m playwright install --with-deps chromium
+
+      - name: Open dashboard and wait for snapshot
+        run: python scripts/trigger_dashboard_snapshot.py
+
