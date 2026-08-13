@@ -84,6 +84,8 @@ class OffshoreFund:
     isin: str
     currency: str
     urls: tuple[str, ...]
+    min_unit_nav: Decimal
+    max_unit_nav: Decimal
 
 
 OFFSHORE_FUNDS: dict[str, OffshoreFund] = {
@@ -98,6 +100,8 @@ OFFSHORE_FUNDS: dict[str, OffshoreFund] = {
             "fund-detail?funds=lu0079474960%3Ausd%3A0",
             "https://www.finanzen.net/fonds/ab-i-american-growth-portfolio-a-lu0079474960",
         ),
+        min_unit_nav=Decimal("100"),
+        max_unit_nav=Decimal("500"),
     ),
     "IPFD3391": OffshoreFund(
         fund_code="IPFD3391",
@@ -107,10 +111,11 @@ OFFSHORE_FUNDS: dict[str, OffshoreFund] = {
         urls=(
             "https://www.janushenderson.com/en-be/advisor/product/"
             "janus-henderson-horizon-global-technology-leaders-fund/?identifier=LU0070992663",
-            "https://www.chiefgroup.com.hk/en/funds/fundsinfo/dp?secid=F0GBR04E8V",
             "https://www.finanzen.net/fonds/"
             "janus-henderson-horizon-global-technology-leaders-fund-lu0070992663",
         ),
+        min_unit_nav=Decimal("200"),
+        max_unit_nav=Decimal("600"),
     ),
 }
 
@@ -137,6 +142,11 @@ class OffshoreFundNavProvider(FundNavProvider):
                 )
                 response.raise_for_status()
                 unit_nav, nav_date = parse_offshore_fund_page(response.text, fund.currency)
+                if not fund.min_unit_nav <= unit_nav <= fund.max_unit_nav:
+                    raise ValueError(
+                        f"NAV {unit_nav} is outside the expected range "
+                        f"{fund.min_unit_nav}-{fund.max_unit_nav} for {fund.fund_code}"
+                    )
                 return FundNav(
                     fund_code=fund.fund_code,
                     fund_name=fund.fund_name,

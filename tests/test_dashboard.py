@@ -113,6 +113,28 @@ def test_apply_fund_nav_estimates_updates_fund_value_and_pnl() -> None:
     assert updated.loc[0, "fund_nav_date"] == "2026-05-11"
 
 
+def test_apply_fund_nav_estimates_rejects_offshore_nav_outlier() -> None:
+    dashboard = load_dashboard_module()
+    positions = pd.DataFrame([{
+        "asset_type": "fund", "symbol": "IPFD3391", "quantity": 53.102,
+        "price_original": 355.19, "market_value_original": 18861.30,
+        "market_value_usd": 18861.30, "currency": "USD", "cost_original": 20000.0,
+        "total_pnl_original": -1138.70, "unrealized_pnl_original": -1138.70,
+        "estimate_note": "",
+    }])
+    navs = pd.DataFrame([{
+        "fund_code": "IPFD3391", "fund_name": "JH Technology", "unit_nav": "52.0",
+        "nav_date": "2026-08-12", "source": "offshore:wrong", "status": "ok",
+    }])
+
+    updated = dashboard.apply_fund_nav_estimates(positions, navs, {})
+
+    assert updated.loc[0, "price_original"] == 355.19
+    assert updated.loc[0, "market_value_original"] == 18861.30
+    assert updated.loc[0, "total_pnl_original"] == -1138.70
+    assert updated.loc[0, "fund_nav_status"] == "rejected_outlier"
+
+
 def test_daily_return_series_supports_total_wealth_and_investment_modes() -> None:
     dashboard = load_dashboard_module()
     history = pd.DataFrame(

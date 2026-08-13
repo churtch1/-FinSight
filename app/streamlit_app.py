@@ -1433,6 +1433,17 @@ def apply_fund_nav_estimates(
         if nav is None or quantity is None or pd.isna(quantity) or float(quantity) <= 0:
             continue
 
+        snapshot_price = row.get("price_original")
+        if fund_code.startswith("IPFD") and snapshot_price is not None and not pd.isna(snapshot_price):
+            snapshot_price = float(snapshot_price)
+            nav_price = float(nav.unit_nav)
+            if snapshot_price > 0 and not 0.5 <= nav_price / snapshot_price <= 1.5:
+                df.at[index, "fund_nav_date"] = nav.nav_date.isoformat()
+                df.at[index, "fund_nav_source"] = nav.source
+                df.at[index, "fund_nav_status"] = "rejected_outlier"
+                df.at[index, "estimate_note"] = "Rejected offshore NAV outlier; kept statement valuation."
+                continue
+
         estimated_value = float(quantity) * float(nav.unit_nav)
         currency = str(row.get("currency") or "CNY")
         df.at[index, "price_original"] = float(nav.unit_nav)
