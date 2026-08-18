@@ -81,9 +81,46 @@ class IbkrFlexClient:
 
 def parse_flex_positions(text: str) -> list[FlexPosition]:
     root = ET.fromstring(text)
+    parents = {child: parent for parent in root.iter() for child in parent}
     rows: list[FlexPosition] = []
     for element in root.iter():
-        if _local_name(element.tag) != "OpenPosition":
+        element_name = _local_name(element.tag)
+        if element_name == "CashReportCurrency":
+            raw = element.attrib
+            currency = _attr(raw, "currency").upper()
+            ending_cash = _attr(raw, "endingCash")
+            if not ending_cash or currency in {"", "BASE_SUMMARY", "BASE SUMMARY", "TOTAL"}:
+                continue
+            account_id = _attr(raw, "accountId") or _ancestor_attr(element, parents, "accountId")
+            report_date = (
+                _attr(raw, "reportDate", "toDate")
+                or _ancestor_attr(element, parents, "reportDate", "toDate")
+            )
+            balance = _decimal(ending_cash)
+            rows.append(
+                FlexPosition(
+                    account_id=account_id,
+                    report_date=_date(report_date),
+                    asset_class="CASH",
+                    currency=currency,
+                    symbol=f"{currency} CASH",
+                    description=f"{currency} Cash",
+                    conid="",
+                    security_id="",
+                    security_id_type="",
+                    cusip="",
+                    isin="",
+                    quantity=balance,
+                    multiplier=Decimal("1"),
+                    mark_price=Decimal("1"),
+                    position_value=balance,
+                    cost_basis_money=balance,
+                    unrealized_pnl=Decimal("0"),
+                    accrued_interest=None,
+                )
+            )
+            continue
+        if element_name != "OpenPosition":
             continue
         raw = element.attrib
         rows.append(
@@ -133,6 +170,7 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
     updated = 0
     open_instruments_by_account: dict[str, set[str]] = {}
     report_dates_by_account: dict[str, date] = {}
+    cash_reported_by_account: set[str] = set()
 
     for position in positions:
         account_uuid = account_map.get(position.account_id)
@@ -148,6 +186,8 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
             continue
         instrument_id = str(instrument["id"])
         open_instruments_by_account.setdefault(account_uuid, set()).add(instrument_id)
+        if position.asset_class.upper() == "CASH":
+            cash_reported_by_account.add(account_uuid)
         current_report_date = report_dates_by_account.get(account_uuid)
         if current_report_date is None or position.report_date > current_report_date:
             report_dates_by_account[account_uuid] = position.report_date
@@ -159,6 +199,7 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
         if instrument_updates:
             client.table("instruments").update(instrument_updates).eq("id", instrument_id).execute()
 
+        is_cash = position.asset_class.upper() == "CASH"
         pnl = position.unrealized_pnl
         cost = position.cost_basis_money
         payload: dict[str, Any] = {
@@ -170,11 +211,15 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
             "currency": position.currency,
             "market_value_usd": str(position.position_value) if position.currency == "USD" else None,
             "fx_rate_to_usd": "1" if position.currency == "USD" else None,
-            "fx_rate_source": "ibkr_flex",
+            "fx_rate_source": "ibkr_flex:cash" if is_cash else "ibkr_flex",
             "fx_rate_date": position.report_date.isoformat(),
             "valuation_date": position.report_date.isoformat(),
             "quantity_source": "reported",
-            "estimate_note": "Official prior-business-day IBKR Flex mark price.",
+            "estimate_note": (
+                "Official prior-business-day IBKR Flex ending cash."
+                if is_cash
+                else "Official prior-business-day IBKR Flex mark price."
+            ),
         }
         if cost is not None:
             payload["cost_original"] = str(cost)
@@ -195,6 +240,7 @@ def sync_flex_positions(client: Any, positions: list[FlexPosition]) -> int:
             account_uuid=account_uuid,
             report_date=report_date,
             open_instrument_ids=open_instruments_by_account.get(account_uuid, set()),
+            cash_reported=account_uuid in cash_reported_by_account,
         )
     return updated
 
@@ -205,8 +251,9 @@ def _reconcile_flex_account_snapshot(
     account_uuid: str,
     report_date: date,
     open_instrument_ids: set[str],
+    cash_reported: bool = False,
 ) -> None:
-    """Close securities absent from Flex and carry non-security rows into a complete snapshot."""
+    """Close absent securities and cash currencies in a complete Flex snapshot."""
     rows = (
         client.table("positions_current")
         .select(
@@ -240,7 +287,8 @@ def _reconcile_flex_account_snapshot(
         payload = {key: value for key, value in row.items() if key in allowed}
         payload["valuation_date"] = report_date.isoformat()
         asset_type = str((row.get("instruments") or {}).get("asset_type") or "")
-        if asset_type in security_types:
+        if asset_type in security_types or (asset_type == "cash" and cash_reported):
+            is_cash = asset_type == "cash"
             payload.update(
                 {
                     "quantity": "0",
@@ -251,9 +299,13 @@ def _reconcile_flex_account_snapshot(
                     "income_original": "0",
                     "total_pnl_original": "0",
                     "pnl_pct": "0",
-                    "fx_rate_source": "ibkr_flex:closed",
+                    "fx_rate_source": "ibkr_flex:cash_zero" if is_cash else "ibkr_flex:closed",
                     "fx_rate_date": report_date.isoformat(),
-                    "estimate_note": "Closed because the security is absent from the latest IBKR Flex open-positions report.",
+                    "estimate_note": (
+                        "Zero because the currency is absent from the latest IBKR Flex cash report."
+                        if is_cash
+                        else "Closed because the security is absent from the latest IBKR Flex open-positions report."
+                    ),
                 }
             )
         client.table("positions_current").upsert(
@@ -286,6 +338,20 @@ def _attr(raw: dict[str, str], *names: str) -> str:
     for name in names:
         if name in raw:
             return str(raw[name] or "").strip()
+    return ""
+
+
+def _ancestor_attr(
+    element: ET.Element,
+    parents: dict[ET.Element, ET.Element],
+    *names: str,
+) -> str:
+    parent = parents.get(element)
+    while parent is not None:
+        value = _attr(parent.attrib, *names)
+        if value:
+            return value
+        parent = parents.get(parent)
     return ""
 
 
