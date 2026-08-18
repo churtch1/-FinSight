@@ -284,6 +284,34 @@ def test_complete_account_snapshot_carries_unchanged_holdings_forward() -> None:
     assert cash["market_value_original"] == "500.00"
 
 
+def test_latest_complete_account_snapshot_does_not_resurrect_sold_holding() -> None:
+    dashboard = load_dashboard_module()
+    rows = [
+        {
+            "account_id": "cmb",
+            "instrument_id": "sold-usd-product",
+            "valuation_date": "2026-08-12",
+        },
+        {
+            "account_id": "cmb",
+            "instrument_id": "active-wealth-product",
+            "valuation_date": "2026-08-13",
+        },
+        {
+            "account_id": "hsbc",
+            "instrument_id": "active-fund",
+            "valuation_date": "2026-08-11",
+        },
+    ]
+
+    latest = dashboard.latest_complete_account_snapshot_rows(rows)
+
+    assert {(row["account_id"], row["instrument_id"]) for row in latest} == {
+        ("cmb", "active-wealth-product"),
+        ("hsbc", "active-fund"),
+    }
+
+
 def test_latest_account_snapshot_hides_zero_quantity_closed_positions() -> None:
     dashboard = load_dashboard_module()
     rows = pd.DataFrame(

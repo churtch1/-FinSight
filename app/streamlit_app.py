@@ -3121,13 +3121,26 @@ POSITION_SNAPSHOT_COLUMNS = (
 
 def latest_position_rows_for_snapshot(client: Any) -> list[dict[str, Any]]:
     rows = client.table("positions_current").select(POSITION_SNAPSHOT_COLUMNS).execute().data or []
-    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    return latest_complete_account_snapshot_rows(rows)
+
+
+def latest_complete_account_snapshot_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return only the newest complete snapshot for each account.
+
+    Selecting the newest row for every instrument independently can resurrect a
+    holding that disappeared from a later account snapshot after it was sold.
+    """
+    latest_dates: dict[str, str] = {}
     for row in rows:
-        key = (str(row.get("account_id") or ""), str(row.get("instrument_id") or ""))
-        existing = latest.get(key)
-        if existing is None or str(row.get("valuation_date") or "") > str(existing.get("valuation_date") or ""):
-            latest[key] = row
-    return list(latest.values())
+        account_id = str(row.get("account_id") or "")
+        valuation_date = str(row.get("valuation_date") or "")
+        if valuation_date > latest_dates.get(account_id, ""):
+            latest_dates[account_id] = valuation_date
+    return [
+        row
+        for row in rows
+        if str(row.get("valuation_date") or "") == latest_dates.get(str(row.get("account_id") or ""), "")
+    ]
 
 
 def snapshot_payload(row: dict[str, Any], valuation_date: date) -> dict[str, Any]:
