@@ -1526,7 +1526,21 @@ def currency_symbol(currency: str) -> str:
     return "$" if currency == "USD" else "¥"
 
 
+def amounts_hidden() -> bool:
+    return bool(st.session_state.get("privacy_hide_amounts", False))
+
+
+def masked_amount(value: object, *, decimals: int = 2) -> str:
+    if amounts_hidden():
+        return "••••"
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):,.{decimals}f}"
+
+
 def money(value: float | int, currency: str) -> str:
+    if amounts_hidden():
+        return "••••"
     return f"{currency_symbol(currency)}{float(value):,.2f}"
 
 
@@ -1593,6 +1607,7 @@ def build_spotlight_chart(grouped: pd.DataFrame, accent: str, display_currency: 
     )
 
     fig = go.Figure()
+    private = amounts_hidden()
     fig.add_bar(
         x=top["display_value"],
         y=top["display_name_short"],
@@ -1602,10 +1617,11 @@ def build_spotlight_chart(grouped: pd.DataFrame, accent: str, display_currency: 
         textposition="outside",
         customdata=customdata,
         hovertemplate=(
-            "<b>%{y}</b><br>"
-            "代码：%{customdata[0]}<br>"
-            f"总资金：%{{text}}<br>"
-            f"盈亏额：%{{customdata[1]:,.2f}} {display_currency}<br>"
+            "<b>%{y}</b><br>代码：%{customdata[0]}<br>"
+            "盈亏率：%{customdata[2]:.2%}<extra></extra>"
+            if private
+            else "<b>%{y}</b><br>代码：%{customdata[0]}<br>"
+            f"总资金：%{{text}}<br>盈亏额：%{{customdata[1]:,.2f}} {display_currency}<br>"
             "盈亏率：%{customdata[2]:.2%}<extra></extra>"
         ),
     )
@@ -1619,6 +1635,7 @@ def build_spotlight_chart(grouped: pd.DataFrame, accent: str, display_currency: 
     fig.update_xaxes(
         title=None,
         tickprefix=currency_symbol(display_currency),
+        showticklabels=not private,
         zeroline=False,
     )
     fig.update_yaxes(title=None, showgrid=False)
@@ -1629,12 +1646,16 @@ def build_provider_chart(df: pd.DataFrame) -> go.Figure:
     grouped = df.groupby(["provider_label", "currency"], as_index=False)["display_value"].sum()
     grouped = grouped[grouped["display_value"] > 0]
     fig = px.bar(grouped, x="provider_label", y="display_value", color="currency", text_auto=".2s")
+    if amounts_hidden():
+        fig.update_traces(text=None, hovertemplate="%{x}<br>%{fullData.name}<extra></extra>")
     fig.update_layout(
         margin=dict(l=8, r=8, t=8, b=8),
         height=330,
         xaxis_title=None,
         yaxis_title=None,
     )
+    if amounts_hidden():
+        fig.update_yaxes(showticklabels=False)
     return fig
 
 
@@ -1645,6 +1666,8 @@ def build_allocation_chart(df: pd.DataFrame) -> go.Figure:
     grouped = grouped.sort_values("sort")
     fig = px.pie(grouped, values="display_value", names="asset_label", hole=0.5)
     fig.update_traces(textposition="inside", textinfo="percent+label")
+    if amounts_hidden():
+        fig.update_traces(hovertemplate="%{label}<br>%{percent}<extra></extra>")
     fig.update_layout(margin=dict(l=8, r=8, t=8, b=8), height=340, legend_title_text="")
     return fig
 
@@ -1884,6 +1907,11 @@ def render_sidebar_controls(df: pd.DataFrame) -> tuple[str, str]:
             "<div class='sidebar-block'><div class='sidebar-kicker'>Navigation</div><div class='sidebar-brand'>LXY的Finsight</div><div class='sidebar-subtitle'>资产、结构、持仓和同步操作</div></div>",
             unsafe_allow_html=True,
         )
+        st.toggle(
+            "隐藏所有金额",
+            key="privacy_hide_amounts",
+            help="隐藏市值、成本、盈亏、单价和收益金额；产品名称、数量与比例仍会显示。",
+        )
         current_fx = st.session_state.get("usd_cny_snapshot")
         if current_fx:
             st.markdown(
@@ -2018,13 +2046,16 @@ def show_summary(df: pd.DataFrame, group_cols: list[str], labels: dict[str, str]
             "weight": "占比",
         }
     )
+    if amounts_hidden():
+        view[value_column] = "••••"
+        view[pnl_column] = "••••"
     st.dataframe(
         view,
         use_container_width=True,
         hide_index=True,
         column_config={
-            value_column: st.column_config.NumberColumn(format=number_format(display_currency)),
-            pnl_column: st.column_config.NumberColumn(format=number_format(display_currency)),
+            value_column: st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format=number_format(display_currency)),
+            pnl_column: st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format=number_format(display_currency)),
             "占比": st.column_config.ProgressColumn(format="%.2f%%", min_value=0, max_value=1),
         },
     )
@@ -2181,7 +2212,7 @@ def render_holdings_cards(filtered: pd.DataFrame, display_currency: str, page_si
                     </div>
                     <div class="holding-value">
                         <div class="holding-value-main">{money(row.get("display_value", 0) or 0, display_currency)}</div>
-                        <div class="holding-value-sub">{row.get("currency", "")} 原币 {float(row.get("market_value_original", 0) or 0):,.2f}</div>
+                        <div class="holding-value-sub">{row.get("currency", "")} 原币 {masked_amount(row.get("market_value_original"))}</div>
                     </div>
                 </div>
                 <div class="holding-grid">
@@ -2191,11 +2222,11 @@ def render_holdings_cards(filtered: pd.DataFrame, display_currency: str, page_si
                     </div>
                     <div>
                         <div class="mini-label">{price_label}</div>
-                        <div class="mini-value">{float(row.get("price_original", 0) or 0):,.4f}</div>
+                        <div class="mini-value">{masked_amount(row.get("price_original"), decimals=4)}</div>
                     </div>
                     <div>
                         <div class="mini-label">原币成本</div>
-                        <div class="mini-value">{float(row.get("cost_original", 0) or 0):,.2f}</div>
+                        <div class="mini-value">{masked_amount(row.get("cost_original"))}</div>
                     </div>
                     <div>
                         <div class="mini-label">盈亏</div>
@@ -2281,6 +2312,10 @@ def render_holdings_table(filtered: pd.DataFrame, display_currency: str, page_si
         }
     )
     view["盈亏率"] = view["盈亏率"] * 100
+    money_columns = ["单价/金价", "原币市值", value_column, "原币成本", pnl_column]
+    if amounts_hidden():
+        for column in money_columns:
+            view[column] = "••••"
     st.caption(f"第 {page} / {total_pages} 页，共 {total_rows} 条。表格末行显示当前筛选结果的汇总。")
     st.dataframe(
         style_positions_table(view),
@@ -2288,11 +2323,11 @@ def render_holdings_table(filtered: pd.DataFrame, display_currency: str, page_si
         hide_index=True,
         column_config={
             "数量/克数": st.column_config.NumberColumn(format="%.4f"),
-            "单价/金价": st.column_config.NumberColumn(format="%.4f"),
-            "原币市值": st.column_config.NumberColumn(format="%.2f"),
-            value_column: st.column_config.NumberColumn(format=number_format(display_currency)),
-            "原币成本": st.column_config.NumberColumn(format="%.2f"),
-            pnl_column: st.column_config.NumberColumn(format=number_format(display_currency)),
+            "单价/金价": st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format="%.4f"),
+            "原币市值": st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format="%.2f"),
+            value_column: st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format=number_format(display_currency)),
+            "原币成本": st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format="%.2f"),
+            pnl_column: st.column_config.TextColumn() if amounts_hidden() else st.column_config.NumberColumn(format=number_format(display_currency)),
             "盈亏率": st.column_config.NumberColumn(format="%.2f%%"),
         },
     )
@@ -3589,7 +3624,7 @@ def render_return_calendar(
                 value_text = "—"
                 tone = "neutral"
             else:
-                value_text = f"{value:+,.0f}"
+                value_text = "••••" if amounts_hidden() else f"{value:+,.0f}"
                 tone = "positive" if value > 0 else "negative" if value < 0 else "neutral"
             status = f"{updates} 个账户结算" if updates else "沿用最近估值"
             cells.append(

@@ -135,6 +135,25 @@ def test_apply_fund_nav_estimates_rejects_offshore_nav_outlier() -> None:
     assert updated.loc[0, "fund_nav_status"] == "rejected_outlier"
 
 
+def test_privacy_mode_masks_money_and_chart_amounts(monkeypatch) -> None:
+    dashboard = load_dashboard_module()
+    monkeypatch.setattr(dashboard.st, "session_state", {"privacy_hide_amounts": True})
+
+    assert dashboard.money(123456.78, "CNY") == "••••"
+    assert dashboard.metric_money(-50, "USD") == "••••"
+    assert dashboard.masked_amount(355.19, decimals=4) == "••••"
+
+    grouped = pd.DataFrame([{
+        "symbol": "IPFD3391", "display_name_short": "科技基金",
+        "display_value": 18861.30, "display_pnl": -1138.70, "pnl_pct": -0.0569,
+    }])
+    fig = dashboard.build_spotlight_chart(grouped, "#2563eb", "USD")
+
+    assert fig.data[0].text[0] == "••••"
+    assert fig.layout.xaxis.showticklabels is False
+    assert "盈亏额" not in fig.data[0].hovertemplate
+
+
 def test_daily_return_series_supports_total_wealth_and_investment_modes() -> None:
     dashboard = load_dashboard_module()
     history = pd.DataFrame(
