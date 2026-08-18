@@ -351,6 +351,22 @@ def test_build_query_preserves_auth_params(monkeypatch) -> None:
     assert parsed[dashboard.AUTH_QUERY_EXPIRES] == ["4102444800"]
 
 
+def test_build_query_preserves_global_privacy_mode(monkeypatch) -> None:
+    dashboard = load_dashboard_module()
+    params = {
+        "section": dashboard.SECTION_OPTIONS[0],
+        "currency": "USD",
+    }
+    monkeypatch.setattr(dashboard, "query_param_value", lambda name: params.get(name))
+    monkeypatch.setattr(dashboard.st, "session_state", {"privacy_hide_amounts": True})
+
+    query = dashboard.build_query(section=dashboard.SECTION_OPTIONS[-1])
+    parsed = parse_qs(urlparse(query).query)
+
+    assert parsed["privacy"] == ["1"]
+    assert parsed["section"] == [dashboard.SECTION_OPTIONS[-1]]
+
+
 def test_us_stock_symbols_only_include_ibkr_us_listed_positions() -> None:
     dashboard = load_dashboard_module()
     positions = pd.DataFrame(

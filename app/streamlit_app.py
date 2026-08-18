@@ -1846,6 +1846,7 @@ def build_query(**updates: str) -> str:
         "asset": query_param_value("asset") or st.session_state.get("asset", "全部"),
         "view": query_param_value("view") or st.session_state.get("view", HOLDINGS_VIEW_OPTIONS[0]),
         "sort": query_param_value("sort") or st.session_state.get("sort", HOLDINGS_SORT_OPTIONS[0]),
+        "privacy": "1" if amounts_hidden() else None,
         AUTH_QUERY_TOKEN: query_param_value(AUTH_QUERY_TOKEN),
         AUTH_QUERY_EXPIRES: query_param_value(AUTH_QUERY_EXPIRES),
     }
@@ -1902,16 +1903,23 @@ def render_sidebar_currency(active_currency: str, section: str) -> None:
 
 def render_sidebar_controls(df: pd.DataFrame) -> tuple[str, str]:
     latest_date = latest_valuation_date(df)
+    if "privacy_hide_amounts" not in st.session_state:
+        st.session_state["privacy_hide_amounts"] = query_param_value("privacy") == "1"
     with st.sidebar:
         st.markdown(
             "<div class='sidebar-block'><div class='sidebar-kicker'>Navigation</div><div class='sidebar-brand'>LXY的Finsight</div><div class='sidebar-subtitle'>资产、结构、持仓和同步操作</div></div>",
             unsafe_allow_html=True,
         )
-        st.toggle(
+        privacy_enabled = st.toggle(
             "隐藏所有金额",
             key="privacy_hide_amounts",
             help="隐藏市值、成本、盈亏、单价和收益金额；产品名称、数量与比例仍会显示。",
         )
+        privacy_param = query_param_value("privacy")
+        if privacy_enabled and privacy_param != "1":
+            st.query_params["privacy"] = "1"
+        elif not privacy_enabled and privacy_param is not None:
+            del st.query_params["privacy"]
         current_fx = st.session_state.get("usd_cny_snapshot")
         if current_fx:
             st.markdown(
