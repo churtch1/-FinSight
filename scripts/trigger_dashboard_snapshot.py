@@ -24,20 +24,34 @@ def signed_dashboard_url(base_url: str, password: str, expires_at: int) -> str:
     return f"{base_url.rstrip('/')}/?{query}"
 
 
+def _rendered_body_text(page: object) -> str:
+    """Read both the Community Cloud shell and its embedded app iframe."""
+    texts = []
+    for frame in page.frames:
+        try:
+            text = frame.locator("body").inner_text(timeout=3_000).strip()
+        except Exception:
+            continue
+        if text:
+            texts.append(text)
+    return "\n".join(texts)
+
+
 def _click_streamlit_wake_up(page: object) -> bool:
     """Wake a sleeping Streamlit Community Cloud app when its interstitial appears."""
-    for label in WAKE_UP_LABELS:
-        candidate = page.get_by_text(label, exact=False)
-        if candidate.count() and candidate.first.is_visible():
-            candidate.first.click(timeout=10_000)
-            page.wait_for_timeout(3_000)
-            return True
+    for frame in page.frames:
+        for label in WAKE_UP_LABELS:
+            candidate = frame.get_by_text(label, exact=False)
+            if candidate.count() and candidate.first.is_visible():
+                candidate.first.click(timeout=10_000)
+                page.wait_for_timeout(3_000)
+                return True
     return False
 
 
 def _page_state(page: object, body: str | None = None) -> str:
     """Return non-sensitive state markers for actionable Actions logs."""
-    body = body if body is not None else page.locator("body").inner_text(timeout=5_000)
+    body = body if body is not None else _rendered_body_text(page)
     markers = []
     if "访问密码" in body:
         markers.append("login_form")
@@ -89,13 +103,13 @@ def _attach_browser_diagnostics(page: object) -> None:
     page.on("websocket", on_websocket)
 
 
-def _wait_for_dashboard(page: object, timeout_seconds: int = 30) -> str:
+def _wait_for_dashboard(page: object, timeout_seconds: int = 45) -> str:
     deadline = time.monotonic() + timeout_seconds
     next_progress = time.monotonic() + 15
     latest_pattern = re.compile(r"最新估值(?:日期)?[：\s]")
     while time.monotonic() < deadline:
         _click_streamlit_wake_up(page)
-        body = page.locator("body").inner_text(timeout=5_000)
+        body = _rendered_body_text(page)
         if "访问密码" in body:
             raise RuntimeError(
                 "Dashboard authentication failed: the GitHub STREAMLIT_PASSWORD does not match Streamlit Cloud."
@@ -117,7 +131,7 @@ def _wait_for_dashboard(page: object, timeout_seconds: int = 30) -> str:
             print(f"snapshot_waiting: {_page_state(page, body)}", flush=True)
             next_progress = time.monotonic() + 15
         page.wait_for_timeout(2_000)
-    body = page.locator("body").inner_text(timeout=5_000)
+    body = _rendered_body_text(page)
     raise RuntimeError(
         f"Dashboard did not become ready within {timeout_seconds}s (state={_page_state(page, body)})."
     )
@@ -141,8 +155,9 @@ def trigger_snapshot(base_url: str, password: str) -> str:
                 text = _wait_for_dashboard(page)
                 # Give Streamlit's post-login daily sync and rerun time to settle.
                 page.wait_for_timeout(15_000)
-                if page.get_by_text("自动同步暂未完成", exact=False).count():
-                    raise RuntimeError(page.get_by_text("自动同步暂未完成", exact=False).first.inner_text())
+                rendered_body = _rendered_body_text(page)
+                if "自动同步暂未完成" in rendered_body:
+                    raise RuntimeError("Dashboard loaded, but an automatic synchronization is still incomplete.")
                 browser.close()
                 return text
             except Exception as exc:
