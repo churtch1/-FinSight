@@ -6,7 +6,7 @@ import os
 import re
 import sys
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 AUTH_QUERY_TOKEN = "auth"
 AUTH_QUERY_EXPIRES = "auth_exp"
@@ -54,7 +54,42 @@ def _page_state(page: object, body: str | None = None) -> str:
     return ",".join(markers)
 
 
-def _wait_for_dashboard(page: object, timeout_seconds: int = 60) -> str:
+def _safe_diagnostic(value: object) -> str:
+    text = str(value)
+    text = re.sub(r"([?&](?:auth|auth_exp)=)[^&\s]+", r"\1REDACTED", text)
+    text = re.sub(r"\b[0-9a-fA-F]{32,}\b", "REDACTED", text)
+    return text[:500]
+
+
+def _request_path(request: object) -> str:
+    parts = urlsplit(request.url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
+def _attach_browser_diagnostics(page: object) -> None:
+    def on_console(message: object) -> None:
+        if message.type in {"error", "warning"}:
+            print(f"browser_console_{message.type}: {_safe_diagnostic(message.text)}", flush=True)
+
+    def on_request_failed(request: object) -> None:
+        print(
+            f"browser_request_failed: {_request_path(request)} error={_safe_diagnostic(request.failure)}",
+            flush=True,
+        )
+
+    def on_websocket(socket: object) -> None:
+        parts = urlsplit(socket.url)
+        print(f"browser_websocket_opened: {parts.scheme}://{parts.netloc}{parts.path}", flush=True)
+        socket.on("socketerror", lambda error: print(f"browser_websocket_error: {_safe_diagnostic(error)}", flush=True))
+        socket.on("close", lambda: print("browser_websocket_closed", flush=True))
+
+    page.on("console", on_console)
+    page.on("pageerror", lambda error: print(f"browser_page_error: {_safe_diagnostic(error)}", flush=True))
+    page.on("requestfailed", on_request_failed)
+    page.on("websocket", on_websocket)
+
+
+def _wait_for_dashboard(page: object, timeout_seconds: int = 30) -> str:
     deadline = time.monotonic() + timeout_seconds
     next_progress = time.monotonic() + 15
     latest_pattern = re.compile(r"最新估值(?:日期)?[：\s]")
@@ -99,6 +134,7 @@ def trigger_snapshot(base_url: str, password: str) -> str:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 900})
+        _attach_browser_diagnostics(page)
         for attempt in range(2):
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=120_000)
