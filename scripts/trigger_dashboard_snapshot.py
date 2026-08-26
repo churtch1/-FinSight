@@ -35,9 +35,9 @@ def _click_streamlit_wake_up(page: object) -> bool:
     return False
 
 
-def _page_state(page: object) -> str:
+def _page_state(page: object, body: str | None = None) -> str:
     """Return non-sensitive state markers for actionable Actions logs."""
-    body = page.locator("body").inner_text(timeout=5_000)
+    body = body if body is not None else page.locator("body").inner_text(timeout=5_000)
     markers = []
     if "访问密码" in body:
         markers.append("login_form")
@@ -45,7 +45,13 @@ def _page_state(page: object) -> str:
         markers.append("sleeping_app")
     if "This app has encountered an error" in body or "应用发生错误" in body:
         markers.append("streamlit_error")
-    return ",".join(markers) or "dashboard_not_ready"
+    if not body.strip():
+        markers.append("empty_page")
+    title = page.title() or "untitled"
+    safe_title = re.sub(r"[^\w .:/-]", "", title)[:80]
+    markers.append(f"title={safe_title}")
+    markers.append(f"text_chars={len(body)}")
+    return ",".join(markers)
 
 
 def _wait_for_dashboard(page: object, timeout_seconds: int = 150) -> str:
@@ -61,11 +67,21 @@ def _wait_for_dashboard(page: object, timeout_seconds: int = 150) -> str:
         if "This app has encountered an error" in body or "应用发生错误" in body:
             raise RuntimeError("Streamlit displayed an application error before the dashboard loaded.")
 
-        latest = page.get_by_text(latest_pattern)
-        if latest.count() and latest.first.is_visible():
-            return latest.first.inner_text(timeout=10_000).strip()
+        # Inspect the rendered body text directly. Streamlit reruns can leave a
+        # hidden stale node before the visible dashboard, making `.first`
+        # locators wait forever even though the dashboard is already present.
+        match = latest_pattern.search(body)
+        if match:
+            line_start = body.rfind("\n", 0, match.start()) + 1
+            line_end = body.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(body)
+            return body[line_start:line_end].strip()
         page.wait_for_timeout(2_000)
-    raise RuntimeError(f"Dashboard did not become ready within {timeout_seconds}s (state={_page_state(page)}).")
+    body = page.locator("body").inner_text(timeout=5_000)
+    raise RuntimeError(
+        f"Dashboard did not become ready within {timeout_seconds}s (state={_page_state(page, body)})."
+    )
 
 
 def trigger_snapshot(base_url: str, password: str) -> str:
