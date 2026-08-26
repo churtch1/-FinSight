@@ -54,8 +54,9 @@ def _page_state(page: object, body: str | None = None) -> str:
     return ",".join(markers)
 
 
-def _wait_for_dashboard(page: object, timeout_seconds: int = 150) -> str:
+def _wait_for_dashboard(page: object, timeout_seconds: int = 60) -> str:
     deadline = time.monotonic() + timeout_seconds
+    next_progress = time.monotonic() + 15
     latest_pattern = re.compile(r"最新估值(?:日期)?[：\s]")
     while time.monotonic() < deadline:
         _click_streamlit_wake_up(page)
@@ -77,6 +78,9 @@ def _wait_for_dashboard(page: object, timeout_seconds: int = 150) -> str:
             if line_end < 0:
                 line_end = len(body)
             return body[line_start:line_end].strip()
+        if time.monotonic() >= next_progress:
+            print(f"snapshot_waiting: {_page_state(page, body)}", flush=True)
+            next_progress = time.monotonic() + 15
         page.wait_for_timeout(2_000)
     body = page.locator("body").inner_text(timeout=5_000)
     raise RuntimeError(
@@ -107,6 +111,7 @@ def trigger_snapshot(base_url: str, password: str) -> str:
                 return text
             except Exception as exc:
                 last_error = str(exc)
+                print(f"snapshot_attempt_failed: attempt={attempt + 1}, error={last_error}", flush=True)
                 if attempt == 0:
                     page.wait_for_timeout(5_000)
                     page.reload(wait_until="domcontentloaded", timeout=120_000)
