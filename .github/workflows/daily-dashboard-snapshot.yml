@@ -29,9 +29,8 @@ jobs:
 
       - name: Install browser
         run: |
-          python -m pip install --disable-pip-version-check playwright==1.54.0
+          python -m pip install --disable-pip-version-check playwright==1.62.0
           python -m playwright install --with-deps chromium
 
       - name: Open dashboard and wait for snapshot
         run: python scripts/trigger_dashboard_snapshot.py
-
