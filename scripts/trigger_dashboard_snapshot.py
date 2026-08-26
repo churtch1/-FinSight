@@ -3,12 +3,18 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import sys
 import time
 from urllib.parse import urlencode
 
 AUTH_QUERY_TOKEN = "auth"
 AUTH_QUERY_EXPIRES = "auth_exp"
+WAKE_UP_LABELS = (
+    "Yes, get this app back up!",
+    "Get this app back up",
+    "Wake up",
+)
 
 
 def signed_dashboard_url(base_url: str, password: str, expires_at: int) -> str:
@@ -18,8 +24,51 @@ def signed_dashboard_url(base_url: str, password: str, expires_at: int) -> str:
     return f"{base_url.rstrip('/')}/?{query}"
 
 
+def _click_streamlit_wake_up(page: object) -> bool:
+    """Wake a sleeping Streamlit Community Cloud app when its interstitial appears."""
+    for label in WAKE_UP_LABELS:
+        candidate = page.get_by_text(label, exact=False)
+        if candidate.count() and candidate.first.is_visible():
+            candidate.first.click(timeout=10_000)
+            page.wait_for_timeout(3_000)
+            return True
+    return False
+
+
+def _page_state(page: object) -> str:
+    """Return non-sensitive state markers for actionable Actions logs."""
+    body = page.locator("body").inner_text(timeout=5_000)
+    markers = []
+    if "访问密码" in body:
+        markers.append("login_form")
+    if any(label.casefold() in body.casefold() for label in WAKE_UP_LABELS):
+        markers.append("sleeping_app")
+    if "This app has encountered an error" in body or "应用发生错误" in body:
+        markers.append("streamlit_error")
+    return ",".join(markers) or "dashboard_not_ready"
+
+
+def _wait_for_dashboard(page: object, timeout_seconds: int = 150) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    latest_pattern = re.compile(r"最新估值(?:日期)?[：\s]")
+    while time.monotonic() < deadline:
+        _click_streamlit_wake_up(page)
+        body = page.locator("body").inner_text(timeout=5_000)
+        if "访问密码" in body:
+            raise RuntimeError(
+                "Dashboard authentication failed: the GitHub STREAMLIT_PASSWORD does not match Streamlit Cloud."
+            )
+        if "This app has encountered an error" in body or "应用发生错误" in body:
+            raise RuntimeError("Streamlit displayed an application error before the dashboard loaded.")
+
+        latest = page.get_by_text(latest_pattern)
+        if latest.count() and latest.first.is_visible():
+            return latest.first.inner_text(timeout=10_000).strip()
+        page.wait_for_timeout(2_000)
+    raise RuntimeError(f"Dashboard did not become ready within {timeout_seconds}s (state={_page_state(page)}).")
+
+
 def trigger_snapshot(base_url: str, password: str) -> str:
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
     if not password:
@@ -33,19 +82,17 @@ def trigger_snapshot(base_url: str, password: str) -> str:
         for attempt in range(2):
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=120_000)
-                latest = page.get_by_text("最新估值日期：", exact=False)
-                latest.wait_for(state="visible", timeout=180_000)
-                text = latest.first.inner_text(timeout=10_000).strip()
+                text = _wait_for_dashboard(page)
                 # Give Streamlit's post-login daily sync and rerun time to settle.
                 page.wait_for_timeout(15_000)
                 if page.get_by_text("自动同步暂未完成", exact=False).count():
                     raise RuntimeError(page.get_by_text("自动同步暂未完成", exact=False).first.inner_text())
                 browser.close()
                 return text
-            except (PlaywrightTimeoutError, RuntimeError) as exc:
+            except Exception as exc:
                 last_error = str(exc)
                 if attempt == 0:
-                    page.wait_for_timeout(15_000)
+                    page.wait_for_timeout(5_000)
                     page.reload(wait_until="domcontentloaded", timeout=120_000)
         browser.close()
     raise RuntimeError(f"Dashboard snapshot did not complete after one retry: {last_error}")
