@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import importlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -2396,12 +2397,15 @@ def sync_ibkr_flex_via_dashboard(settings: Settings) -> str:
     )
     try:
         updated = sync_flex_positions(client, positions)
-        complete_import(client, import_id, updated, "completed")
+        cash_count = sum(position.asset_class.upper() == "CASH" for position in positions)
+        cash_warning = "" if cash_count else "Flex 报告未返回 Cash Report 明细，请检查查询 1587428 的 Cash Report 配置。"
+        complete_import(client, import_id, updated, "completed", cash_warning or None)
         unmatched = len(positions) - updated
         suffix = f"，另有 {unmatched} 条尚未匹配现有代码" if unmatched else ""
         return (
             f"IBKR Flex 每日持仓同步完成：报告日期 {report_date.isoformat()}，"
-            f"更新 {updated}/{len(positions)} 条股票、ETF 和债券持仓{suffix}。"
+            f"更新 {updated}/{len(positions)} 条记录，其中现金 {cash_count} 条{suffix}。"
+            + (f" {cash_warning}" if cash_warning else "")
         )
     except Exception as exc:
         log_import_error(client, import_id, None, {"query_id": settings.ibkr_flex_query_id}, str(exc))
@@ -2412,7 +2416,7 @@ def sync_ibkr_flex_via_dashboard(settings: Settings) -> str:
 def auto_sync_ibkr_flex_once_daily(settings: Settings) -> None:
     if not settings.ibkr_flex_token or not settings.has_supabase_write_config:
         return
-    session_key = f"ibkr_flex_auto_sync_{date.today().isoformat()}"
+    session_key = f"ibkr_flex_auto_sync_cash_v2_{date.today().isoformat()}"
     if st.session_state.get(session_key):
         return
     st.session_state[session_key] = True
@@ -2421,7 +2425,7 @@ def auto_sync_ibkr_flex_once_daily(settings: Settings) -> None:
         today_start = f"{date.today().isoformat()}T00:00:00"
         completed = (
             client.table("statement_imports")
-            .select("id")
+            .select("id,file_name")
             .eq("source", "ibkr_flex")
             .eq("status", "completed")
             .gte("created_at", today_start)
@@ -2431,7 +2435,18 @@ def auto_sync_ibkr_flex_once_daily(settings: Settings) -> None:
             or []
         )
         if completed:
-            return
+            report_date_match = re.search(r"(\d{4}-\d{2}-\d{2})", str(completed[0].get("file_name") or ""))
+            report_date = report_date_match.group(1) if report_date_match else ""
+            cash_query = (
+                client.table("positions_current")
+                .select("id")
+                .like("fx_rate_source", "ibkr_flex:cash%")
+            )
+            if report_date:
+                cash_query = cash_query.eq("valuation_date", report_date)
+            cash_completed = cash_query.limit(1).execute().data or []
+            if cash_completed:
+                return
         message = sync_ibkr_flex_via_dashboard(settings)
         load_data.clear()
         push_flash("success", message)
