@@ -219,6 +219,73 @@ def test_daily_return_series_supports_total_wealth_and_investment_modes() -> Non
     assert investment.loc[1, "return"] == 20
 
 
+def test_asset_return_curves_index_each_asset_sleeve_to_first_snapshot() -> None:
+    dashboard = load_dashboard_module()
+    history = pd.DataFrame(
+        [
+            {"provider": "CMB", "account_name": "Gold", "symbol": "AU", "currency": "USD", "asset_type": "gold", "quantity": 1, "valuation_date": date(2026, 7, 1), "market_value_usd": 200},
+            {"provider": "CMB", "account_name": "Gold", "symbol": "AU", "currency": "USD", "asset_type": "gold", "quantity": 1, "valuation_date": date(2026, 7, 3), "market_value_usd": 190},
+            {"provider": "IBKR", "account_name": "Trading", "symbol": "AAPL", "currency": "USD", "asset_type": "stock", "quantity": 1, "valuation_date": date(2026, 7, 1), "market_value_usd": 100},
+            {"provider": "IBKR", "account_name": "Trading", "symbol": "AAPL", "currency": "USD", "asset_type": "stock", "quantity": 1, "valuation_date": date(2026, 7, 2), "market_value_usd": 110},
+            {"provider": "IBKR", "account_name": "Trading", "symbol": "UST", "currency": "USD", "asset_type": "bond", "quantity": 1, "valuation_date": date(2026, 7, 2), "market_value_usd": 500},
+        ]
+    )
+
+    curves = dashboard.build_asset_return_curves(history, date(2026, 7, 1), date(2026, 7, 3))
+
+    stock = curves[curves["asset_type"] == "stock"].set_index("date")
+    gold = curves[curves["asset_type"] == "gold"].set_index("date")
+    bond = curves[curves["asset_type"] == "bond"].set_index("date")
+    assert stock.loc[date(2026, 7, 1), "return"] == 0
+    assert round(float(stock.loc[date(2026, 7, 2), "return"]), 6) == 0.1
+    assert round(float(stock.loc[date(2026, 7, 3), "return"]), 6) == 0.1
+    assert round(float(gold.loc[date(2026, 7, 3), "return"]), 6) == -0.05
+    assert bond.loc[date(2026, 7, 2), "return"] == 0
+    assert bond.index.min() == date(2026, 7, 2)
+
+    later_window = dashboard.build_asset_return_curves(history, date(2026, 7, 2), date(2026, 7, 3))
+    later_stock = later_window[later_window["asset_type"] == "stock"].set_index("date")
+    assert later_stock.loc[date(2026, 7, 2), "return"] == 0
+
+
+def test_asset_return_curves_exclude_quantity_changes_and_fill_gold_from_historical_fx() -> None:
+    dashboard = load_dashboard_module()
+    history = pd.DataFrame(
+        [
+            {"provider": "IBKR", "account_name": "Trading", "symbol": "VOO", "currency": "USD", "asset_type": "stock", "quantity": 1, "valuation_date": date(2026, 7, 1), "market_value_usd": 100},
+            {"provider": "IBKR", "account_name": "Trading", "symbol": "VOO", "currency": "USD", "asset_type": "stock", "quantity": 2, "valuation_date": date(2026, 7, 2), "market_value_usd": 200},
+            {"provider": "IBKR", "account_name": "Trading", "symbol": "VOO", "currency": "USD", "asset_type": "stock", "quantity": 2, "valuation_date": date(2026, 7, 3), "market_value_usd": 220},
+            {"provider": "CMB", "account_name": "Gold", "symbol": "CMB-GOLD", "currency": "CNY", "asset_type": "gold", "quantity": 10, "valuation_date": date(2026, 7, 1), "market_value_original": 1000, "market_value_usd": None, "fx_rate_to_usd": 0.14},
+            {"provider": "CMB", "account_name": "Gold", "symbol": "CMB-GOLD", "currency": "CNY", "asset_type": "gold", "quantity": 10, "valuation_date": date(2026, 7, 2), "market_value_original": 1100, "market_value_usd": None, "fx_rate_to_usd": 0.14},
+        ]
+    )
+
+    curves = dashboard.build_asset_return_curves(history, date(2026, 7, 1), date(2026, 7, 3))
+
+    stock = curves[curves["asset_type"] == "stock"].set_index("date")
+    gold = curves[curves["asset_type"] == "gold"].set_index("date")
+    assert stock.loc[date(2026, 7, 2), "return"] == 0
+    assert round(float(stock.loc[date(2026, 7, 3), "return"]), 6) == 0.1
+    assert round(float(gold.loc[date(2026, 7, 2), "return"]), 6) == 0.1
+
+
+def test_asset_return_curve_chart_uses_distinct_smooth_fund_line() -> None:
+    dashboard = load_dashboard_module()
+    curves = pd.DataFrame(
+        [
+            {"date": date(2026, 7, 1), "asset_type": "fund", "return": 0.0},
+            {"date": date(2026, 7, 2), "asset_type": "fund", "return": 0.01},
+        ]
+    )
+
+    figure = dashboard.build_asset_return_curve_chart(curves, "1个月")
+
+    assert figure.data[0].name == "基金"
+    assert figure.data[0].line.color == "#DC2626"
+    assert figure.data[0].line.width == 3.5
+    assert figure.data[0].line.shape == "spline"
+
+
 def test_complete_account_snapshot_carries_unchanged_holdings_forward() -> None:
     dashboard = load_dashboard_module()
 

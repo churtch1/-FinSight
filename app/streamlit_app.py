@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -116,6 +117,13 @@ DISPLAY_CURRENCY_LABELS = {
 }
 
 ASSET_ORDER = ["wealth_product", "fund", "stock", "bond", "gold", "cash", "crypto", "other"]
+RETURN_CURVE_SPECS = {
+    "gold": {"label": "黄金", "color": "#D97706"},
+    "stock": {"label": "美股", "color": "#2563EB"},
+    "bond": {"label": "美债", "color": "#0F766E"},
+    "fund": {"label": "基金", "color": "#DC2626"},
+}
+RETURN_CURVE_PERIODS = {"1个月": 31, "3个月": 92, "1年": 366, "全部": None}
 CURRENCY_ALIASES = {"CNH": "CNY"}
 SECTION_OPTIONS = ["总览", "结构", "持仓", "操作"]
 HOLDINGS_VIEW_OPTIONS = ["卡片", "表格"]
@@ -1125,22 +1133,26 @@ def render_flash() -> None:
 
 
 @st.cache_data(ttl=60)
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool, str | None]:
     settings = get_settings()
     if settings.has_supabase_read_config:
-        client = get_supabase(use_service_role=False, settings=settings)
-        data = fetch_dashboard_data(client)
-        position_history = normalize_positions(pd.DataFrame(data["positions"]), latest_only=False)
-        return (
-            latest_account_snapshots(position_history),
-            position_history,
-            pd.DataFrame(data["imports"]),
-            pd.DataFrame(data["errors"]),
-            pd.DataFrame(data["fx_rates"]),
-            pd.DataFrame(data.get("fund_navs", [])),
-            True,
-        )
-    return load_sample_data()
+        try:
+            client = get_supabase(use_service_role=False, settings=settings)
+            data = fetch_dashboard_data(client)
+            position_history = normalize_positions(pd.DataFrame(data["positions"]), latest_only=False)
+            return (
+                latest_account_snapshots(position_history),
+                position_history,
+                pd.DataFrame(data["imports"]),
+                pd.DataFrame(data["errors"]),
+                pd.DataFrame(data["fx_rates"]),
+                pd.DataFrame(data.get("fund_navs", [])),
+                True,
+                None,
+            )
+        except httpx.HTTPError as exc:
+            return (*load_sample_data(), f"无法连接 Supabase：{exc}")
+    return (*load_sample_data(), None)
 
 
 def normalize_positions(df: pd.DataFrame, *, latest_only: bool = True) -> pd.DataFrame:
@@ -1671,6 +1683,196 @@ def build_allocation_chart(df: pd.DataFrame) -> go.Figure:
         fig.update_traces(hovertemplate="%{label}<br>%{percent}<extra></extra>")
     fig.update_layout(margin=dict(l=8, r=8, t=8, b=8), height=340, legend_title_text="")
     return fig
+
+
+def return_curve_bounds(history: pd.DataFrame, period: str) -> tuple[date, date] | None:
+    dates = pd.to_datetime(history.get("valuation_date", pd.Series(dtype=object)), errors="coerce").dropna()
+    if dates.empty:
+        return None
+    earliest = dates.min().date()
+    latest = dates.max().date()
+    days = RETURN_CURVE_PERIODS.get(period, RETURN_CURVE_PERIODS["3个月"])
+    start = earliest if days is None else max(earliest, latest - timedelta(days=days - 1))
+    return start, latest
+
+
+def build_asset_return_curves(history: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    """Build time-weighted category returns from each holding's daily unit-value changes."""
+    columns = ["date", "asset_type", "asset_label", "return", "market_value_usd"]
+    if history.empty:
+        return pd.DataFrame(columns=columns)
+
+    required = {"asset_type", "valuation_date", "market_value_usd"}
+    if not required.issubset(history.columns):
+        return pd.DataFrame(columns=columns)
+
+    work = history.copy()
+    work["valuation_date"] = pd.to_datetime(work["valuation_date"], errors="coerce").dt.date
+    work["market_value_usd"] = pd.to_numeric(work["market_value_usd"], errors="coerce")
+    work["market_value_original"] = pd.to_numeric(work.get("market_value_original", pd.Series(index=work.index)), errors="coerce")
+    work["price_original"] = pd.to_numeric(work.get("price_original", pd.Series(index=work.index)), errors="coerce")
+    work["quantity"] = pd.to_numeric(work.get("quantity", pd.Series(index=work.index)), errors="coerce")
+    work["fx_rate_to_usd"] = pd.to_numeric(work.get("fx_rate_to_usd", pd.Series(index=work.index)), errors="coerce")
+    if "currency" not in work.columns:
+        work["currency"] = ""
+    work["currency"] = work["currency"].fillna("").astype(str).str.upper()
+    work["market_value_usd"] = work["market_value_usd"].fillna(
+        work["market_value_original"] * work["fx_rate_to_usd"]
+    )
+    work["market_value_usd"] = work["market_value_usd"].fillna(
+        work["market_value_original"].where(work["currency"].eq("USD"))
+    )
+    work = work[
+        work["asset_type"].isin(RETURN_CURVE_SPECS)
+        & work["valuation_date"].notna()
+        & work["valuation_date"].le(end)
+    ].copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+
+    for column in ("provider", "account_name", "symbol", "currency"):
+        if column not in work.columns:
+            work[column] = ""
+        work[column] = work[column].fillna("").astype(str)
+    work["unit_value"] = work["market_value_usd"] / work["quantity"]
+    work["unit_value"] = work["unit_value"].where(work["quantity"].gt(0), work["price_original"])
+    work["unit_value"] = work["unit_value"].fillna(work["price_original"])
+    work["weight_value"] = work["market_value_usd"].fillna(work["market_value_original"])
+
+    identity = ["asset_type", "provider", "account_name", "symbol", "currency"]
+    work = work.sort_values("valuation_date").groupby(identity + ["valuation_date"], as_index=False).tail(1)
+    dates = pd.date_range(start, end, freq="D").date
+    sleeves: dict[str, list[pd.DataFrame]] = {asset_type: [] for asset_type in RETURN_CURVE_SPECS}
+    for keys, rows in work.groupby(identity, dropna=False):
+        asset_type = str(keys[0])
+        snapshot_dates = pd.date_range(rows["valuation_date"].min(), end, freq="D").date
+        values = (
+            rows.set_index("valuation_date")[["unit_value", "weight_value", "quantity"]]
+            .reindex(snapshot_dates)
+            .ffill()
+            .reindex(dates)
+        )
+        values["active"] = values["quantity"].isna() | values["quantity"].gt(0)
+        sleeves[asset_type].append(values)
+
+    records: list[pd.DataFrame] = []
+    for asset_type, series_list in sleeves.items():
+        if not series_list:
+            continue
+        compounded = 1.0
+        rows: list[dict[str, object]] = []
+        first_available: date | None = None
+        for index, current_date in enumerate(dates):
+            eligible: list[tuple[float, float]] = []
+            for sleeve in series_list:
+                current = sleeve.iloc[index]
+                if pd.notna(current["unit_value"]) and bool(current["active"]):
+                    first_available = first_available or current_date
+                if index == 0:
+                    continue
+                previous = sleeve.iloc[index - 1]
+                if not (bool(previous["active"]) and bool(current["active"])):
+                    continue
+                previous_unit = previous["unit_value"]
+                current_unit = current["unit_value"]
+                weight = previous["weight_value"]
+                if pd.isna(previous_unit) or pd.isna(current_unit) or pd.isna(weight) or previous_unit <= 0 or weight <= 0:
+                    continue
+                eligible.append((float(weight), float(current_unit / previous_unit - 1)))
+            if first_available is None:
+                continue
+            if eligible:
+                total_weight = sum(weight for weight, _ in eligible)
+                compounded *= 1 + sum(weight * daily_return for weight, daily_return in eligible) / total_weight
+            rows.append(
+                {
+                    "date": current_date,
+                    "asset_type": asset_type,
+                    "asset_label": RETURN_CURVE_SPECS[asset_type]["label"],
+                    "return": compounded - 1,
+                    "market_value_usd": sum(weight for weight, _ in eligible) if eligible else pd.NA,
+                }
+            )
+        if not rows:
+            continue
+        records.append(pd.DataFrame(rows))
+    return pd.concat(records, ignore_index=True) if records else pd.DataFrame(columns=columns)
+
+
+def build_asset_return_curve_chart(curves: pd.DataFrame, period: str) -> go.Figure:
+    fig = go.Figure()
+    for asset_type, spec in RETURN_CURVE_SPECS.items():
+        subset = curves[curves["asset_type"] == asset_type]
+        if subset.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=subset["date"],
+                y=subset["return"],
+                name=spec["label"],
+                mode="lines",
+                line=dict(color=spec["color"], width=3.5, shape="spline", smoothing=0.55),
+                hovertemplate=f"<b>{spec['label']}</b><br>%{{x|%Y-%m-%d}}<br>收益率：%{{y:+.2%}}<extra></extra>",
+            )
+        )
+
+    tick_settings = {
+        "1个月": {"dtick": 7 * 24 * 60 * 60 * 1000, "tickformat": "%m/%d"},
+        "3个月": {"dtick": "M1", "tickformat": "%m月"},
+        "1年": {"dtick": "M3", "tickformat": "%Y/%m"},
+        "全部": {"dtick": "M3", "tickformat": "%Y/%m"},
+    }
+    fig.update_layout(
+        height=360,
+        margin=dict(l=8, r=18, t=24, b=8),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=13)),
+    )
+    fig.update_xaxes(showgrid=False, zeroline=False, **tick_settings.get(period, tick_settings["3个月"]))
+    fig.update_yaxes(
+        title=None,
+        tickformat="+.0%",
+        zeroline=True,
+        zerolinecolor="rgba(100,116,139,0.45)",
+        gridcolor="rgba(148,163,184,0.22)",
+        fixedrange=True,
+    )
+    return fig
+
+
+def render_asset_return_curves(history: pd.DataFrame) -> None:
+    st.markdown("<div class='section-title'>收益率曲线</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='section-subtitle'>按每日持仓价格/净值变化计算的时间加权收益率；调仓、申赎不会被当作市场涨跌。</div>",
+        unsafe_allow_html=True,
+    )
+    bounds = return_curve_bounds(history, "全部")
+    if bounds is None:
+        st.info("尚无历史估值快照；生成至少两个结算日后即可查看收益率曲线。")
+        return
+
+    period = st.segmented_control(
+        "观察区间",
+        options=list(RETURN_CURVE_PERIODS),
+        default=st.session_state.get("asset_return_curve_period", "3个月"),
+        key="asset_return_curve_period",
+        width="stretch",
+    ) or "3个月"
+    start, end = return_curve_bounds(history, period) or bounds
+    curves = build_asset_return_curves(history, start, end)
+    line_count = int(curves["asset_type"].nunique()) if not curves.empty else 0
+    if line_count == 0 or curves["date"].nunique() < 2:
+        st.info("所选区间内的快照还不足以形成收益率曲线。")
+        return
+    st.plotly_chart(
+        build_asset_return_curve_chart(curves, period),
+        use_container_width=True,
+        theme="streamlit",
+        config=PLOTLY_CONFIG,
+    )
+    st.caption("曲线以每个持仓的单位价格或净值变化为基础，并按前一日市值加权；未更新日沿用最近估值。黄金可使用历史汇率或原币价格补齐。")
 
 
 def get_usd_cny_snapshot(rate_map: dict[str, FxRate]) -> dict[str, str] | None:
@@ -3698,8 +3900,9 @@ def render_overview(
     render_spotlight_panels(df, display_currency)
 
 
-def render_structure(df: pd.DataFrame, display_currency: str) -> None:
+def render_structure(df: pd.DataFrame, display_currency: str, history: pd.DataFrame) -> None:
     render_allocation(df, display_currency)
+    render_asset_return_curves(history)
     render_summary_tables(df, display_currency)
 
 
@@ -3789,17 +3992,20 @@ def main() -> None:
     if not require_password():
         return
     settings = get_settings()
-    auto_sync_ibkr_flex_once_daily(settings)
 
     try:
-        positions, position_history, imports, errors, fx_rates, fund_navs, using_supabase = load_data()
+        positions, position_history, imports, errors, fx_rates, fund_navs, using_supabase, data_load_error = load_data()
     except MissingSupabaseConfig as exc:
         st.error(str(exc))
         st.stop()
 
-    auto_refresh_funds_and_gold_once_daily(positions, settings)
+    if using_supabase:
+        auto_sync_ibkr_flex_once_daily(settings)
+        auto_refresh_funds_and_gold_once_daily(positions, settings)
 
-    if not using_supabase:
+    if data_load_error:
+        st.warning(f"云端数据暂时不可用，当前展示演示数据。{data_load_error}")
+    elif not using_supabase:
         st.warning("当前是演示模式，页面展示的是仓库自带的 demo 样例数据，不是你的真实持仓。配置 Supabase 后会自动读取你的云端资产数据。")
 
     positions, fx_note, rate_map = apply_fx_fallback(positions, fx_rates)
@@ -3821,7 +4027,7 @@ def main() -> None:
     if section == "总览":
         render_overview(positions, display_currency, position_history, rate_map)
     elif section == "结构":
-        render_structure(positions, display_currency)
+        render_structure(positions, display_currency, position_history)
     elif section == "持仓":
         render_holdings(positions, display_currency)
     else:
