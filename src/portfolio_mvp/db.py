@@ -48,13 +48,37 @@ def _select_optional(client: Client, table: str, select: str = "*", order_by: st
         return []
 
 
+def _select_all(
+    client: Client,
+    table: str,
+    select: str = "*",
+    *,
+    order_by: tuple[tuple[str, bool], ...] = (),
+    page_size: int = 1000,
+) -> list[dict[str, Any]]:
+    """Read every row without relying on Supabase's single-response row limit."""
+    rows: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        query = client.table(table).select(select)
+        for column, desc in order_by:
+            query = query.order(column, desc=desc)
+        batch = query.range(start, start + page_size - 1).execute().data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            return rows
+        start += page_size
+
+
 def fetch_dashboard_data(client: Client) -> dict[str, list[dict[str, Any]]]:
     """Fetch dashboard tables through read-only Supabase client."""
     return {
-        "positions": client.table("positions_current").select(
-            "*, accounts(account_name, provider, base_currency), instruments(symbol, name, isin, asset_type)"
-        ).execute().data
-        or [],
+        "positions": _select_all(
+            client,
+            "positions_current",
+            "*, accounts(account_name, provider, base_currency), instruments(symbol, name, isin, asset_type)",
+            order_by=(("valuation_date", False), ("id", False)),
+        ),
         "imports": client.table("statement_imports").select("*").order("created_at", desc=True).limit(20).execute().data
         or [],
         "errors": client.table("import_errors").select("*").order("created_at", desc=True).limit(20).execute().data
