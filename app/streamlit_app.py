@@ -1132,8 +1132,14 @@ def render_flash() -> None:
     renderer(message)
 
 
+DATA_CACHE_VERSION = "2026-09-18-full-position-history-v2"
+
+
 @st.cache_data(ttl=60)
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool, str | None]:
+def load_data(cache_version: str = DATA_CACHE_VERSION) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, bool, str | None]:
+    # Keep an explicit cache-key component so a data-loading fix cannot reuse a
+    # serialized result created by an older Streamlit Cloud deployment.
+    del cache_version
     settings = get_settings()
     if settings.has_supabase_read_config:
         try:
@@ -3994,7 +4000,7 @@ def main() -> None:
     settings = get_settings()
 
     try:
-        positions, position_history, imports, errors, fx_rates, fund_navs, using_supabase, data_load_error = load_data()
+        positions, position_history, imports, errors, fx_rates, fund_navs, using_supabase, data_load_error = load_data(DATA_CACHE_VERSION)
     except MissingSupabaseConfig as exc:
         st.error(str(exc))
         st.stop()
