@@ -474,3 +474,29 @@ def test_us_stock_symbols_only_include_ibkr_us_listed_positions() -> None:
     )
 
     assert dashboard.us_stock_symbols_from_positions(positions) == ["AAPL", "QQQ"]
+
+
+def test_latest_position_rows_for_snapshot_uses_paginated_reader(monkeypatch) -> None:
+    dashboard = load_dashboard_module()
+    expected = [
+        {"account_id": "a1", "instrument_id": "i1", "valuation_date": "2026-09-16"},
+        {"account_id": "a1", "instrument_id": "i2", "valuation_date": "2026-09-16"},
+    ]
+    calls = []
+
+    def fake_select_all(client, table, select, *, order_by):
+        calls.append((client, table, select, order_by))
+        return expected
+
+    client = object()
+    monkeypatch.setattr(dashboard, "_select_all", fake_select_all)
+
+    assert dashboard.latest_position_rows_for_snapshot(client) == expected
+    assert calls == [
+        (
+            client,
+            "positions_current",
+            dashboard.POSITION_SNAPSHOT_COLUMNS,
+            (("valuation_date", False), ("id", False)),
+        )
+    ]

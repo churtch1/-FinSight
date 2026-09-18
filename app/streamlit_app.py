@@ -44,7 +44,7 @@ if not hasattr(config_module.Settings, "ibkr_flex_token"):
 
 Settings = config_module.Settings
 get_settings = config_module.get_settings
-from portfolio_mvp.db import MissingSupabaseConfig, fetch_dashboard_data, get_supabase
+from portfolio_mvp.db import MissingSupabaseConfig, _select_all, fetch_dashboard_data, get_supabase
 from portfolio_mvp.fx import FxRate, convert_to_usd, fetch_online_usd_rates, latest_rate_from_rows
 import portfolio_mvp.fund_nav as fund_nav_module
 
@@ -3343,7 +3343,12 @@ POSITION_SNAPSHOT_COLUMNS = (
 
 
 def latest_position_rows_for_snapshot(client: Any) -> list[dict[str, Any]]:
-    rows = client.table("positions_current").select(POSITION_SNAPSHOT_COLUMNS).execute().data or []
+    rows = _select_all(
+        client,
+        "positions_current",
+        POSITION_SNAPSHOT_COLUMNS,
+        order_by=(("valuation_date", False), ("id", False)),
+    )
     return latest_complete_account_snapshot_rows(rows)
 
 
