@@ -103,7 +103,7 @@ def _attach_browser_diagnostics(page: object) -> None:
     page.on("websocket", on_websocket)
 
 
-def _wait_for_dashboard(page: object, timeout_seconds: int = 45) -> str:
+def _wait_for_dashboard(page: object, timeout_seconds: int = 180) -> str:
     deadline = time.monotonic() + timeout_seconds
     next_progress = time.monotonic() + 15
     latest_pattern = re.compile(r"最新估值(?:日期)?[：\s]")
@@ -152,6 +152,11 @@ def trigger_snapshot(base_url: str, password: str) -> str:
         for attempt in range(2):
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=120_000)
+                # The first page load performs the daily Flex, fund NAV, and
+                # gold refresh before Streamlit renders the hero. Offshore
+                # fund providers can take longer than 45 seconds, so allow the
+                # refresh to finish instead of reloading an active sync and
+                # reporting a false failure.
                 text = _wait_for_dashboard(page)
                 # Give Streamlit's post-login daily sync and rerun time to settle.
                 page.wait_for_timeout(15_000)
